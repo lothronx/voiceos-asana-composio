@@ -36,36 +36,25 @@ test("creates the task for me in the first workspace, with due time in UTC and t
   });
 });
 
-test("moves the task into the chosen section and reports that section's name", async () => {
+test("the section is set in the create call itself, and the result names it", async () => {
   const { execute, calls } = fakeComposio({
     ...LISTS,
-    ASANA_CREATE_A_TASK: created(),
-    ASANA_ADD_TASK_TO_SECTION: () => ({ data: {} }),
+    ASANA_CREATE_A_TASK: (args) => ({ data: { gid: "42", name: "Call Eric", assignee_section: { gid: args.data.assignee_section, name: "Today" } } }),
   });
-  const result = await createAsana(execute).createTask({
-    name: "Call Eric",
-    section: "5",
-    section_choices: [{ gid: "5", name: "Today" }],
-  });
+  const result = await createAsana(execute).createTask({ name: "Call Eric", section: "5", section_choices: [{ gid: "5", name: "Today" }] });
 
-  expect(calls.at(-1)).toEqual({ slug: "ASANA_ADD_TASK_TO_SECTION", args: { section_gid: "5", task_gid: "42" } });
+  expect(calls.find((c) => c.slug === "ASANA_CREATE_A_TASK")?.args.data.assignee_section).toBe("5");
+  expect(calls.map((c) => c.slug)).not.toContain("ASANA_ADD_TASK_TO_SECTION");
   expect(result.task.section).toBe("Today");
-  expect(result.warning).toBeUndefined();
 });
 
-test("a failed section move still returns the created task, with a warning", async () => {
-  const { execute } = fakeComposio({
-    ...LISTS,
-    ASANA_CREATE_A_TASK: created(),
-    ASANA_ADD_TASK_TO_SECTION: () => {
-      throw new Error("section not found");
-    },
-  });
-  const result = await createAsana(execute).createTask({ name: "Call Eric", section: "5" });
-
-  expect(result.task.gid).toBe("42");
-  expect(result.task.section).toBe("Recently assigned");
-  expect(result.warning).toContain("section not found");
+test("one options fetch serves several creates (lists are cached)", async () => {
+  const { execute, calls } = fakeComposio({ ...LISTS, ASANA_CREATE_A_TASK: created() });
+  const asana = createAsana(execute);
+  await asana.listOptions();
+  await asana.createTask({ name: "a", project: "77" });
+  await asana.createTask({ name: "b", section: "5" });
+  expect(calls.filter((c) => c.slug === "ASANA_GET_MULTIPLE_PROJECTS")).toHaveLength(1);
 });
 
 test("fields the user cleared on the card ('') are left out", async () => {

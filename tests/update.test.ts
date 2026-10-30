@@ -31,11 +31,15 @@ function fakeAsana(fail: Record<string, string> = {}) {
       case "ASANA_GET_SECTIONS_IN_PROJECT": return { data: [{ gid: "s1", name: "Recently assigned" }, { gid: "s2", name: "Today" }] };
       case "ASANA_GET_USERS_FOR_WORKSPACE": return { data: [{ gid: "me1", name: "Yue" }, { gid: "u9", name: "Sam" }] };
       case "ASANA_UPDATE_A_TASK":
-        state = { ...state, ...args.data, assignee: "assignee" in args.data ? (args.data.assignee ? { gid: args.data.assignee, name: "Someone" } : null) : state.assignee };
+        state = {
+          ...state,
+          ...args.data,
+          assignee: "assignee" in args.data ? (args.data.assignee ? { gid: args.data.assignee, name: "Someone" } : null) : state.assignee,
+          assignee_section: args.data.assignee_section ? { gid: args.data.assignee_section, name: "Today" } : state.assignee_section,
+        };
         return { data: {} };
       case "ASANA_ADD_PROJECT_FOR_TASK": state.projects = [{ gid: args.project, name: "New project" }, ...state.projects]; return { data: {} };
       case "ASANA_REMOVE_PROJECT_FROM_TASK": state.projects = state.projects.filter((p: any) => p.gid !== args.project); return { data: {} };
-      case "ASANA_ADD_TASK_TO_SECTION": state.assignee_section = { gid: args.section_gid, name: "Today" }; return { data: {} };
     }
     throw new Error(`unexpected ${slug}`);
   };
@@ -104,10 +108,10 @@ test("a new project is added before the old one is removed; '' removes it", asyn
   expect(result.task.project).toBe("");
 });
 
-test("the section moves within My Tasks, but not when the task is reassigned", async () => {
+test("the section moves in the same update call, but not when the task is reassigned", async () => {
   const mine = fakeAsana();
   const moved = await update(mine, { section: "s2" });
-  expect(mine.writes().map((c) => c.slug)).toEqual(["ASANA_ADD_TASK_TO_SECTION"]);
+  expect(mine.writes()).toEqual([{ slug: "ASANA_UPDATE_A_TASK", args: { task_gid: "42", data: { assignee_section: "s2" } } }]);
   expect(moved.task.section).toBe("Today");
 
   const reassigned = fakeAsana();

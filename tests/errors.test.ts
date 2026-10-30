@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { ComposioError, describeError, type AsanaConnection } from "../server.ts";
+import { ComposioError, describeError } from "../server.ts";
 
-const linkStatus = (status: string): AsanaConnection => ({ status: async () => status });
+const linkStatus = (status: string) => async () => status;
 const notConnected = new ComposioError("No connected account", "composio", 404, "ActionExecute_ConnectedAccountNotFound");
 
 test("a missing link says so and where to connect it", async () => {
