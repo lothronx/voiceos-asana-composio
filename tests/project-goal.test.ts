@@ -69,8 +69,8 @@ test("a mislabeled team or an unknown view is refused before the project is crea
   expect(asana.createProject({ name: "x", team: "t1", team_choices: [{ gid: "t1", name: "Sales" }] })).rejects.toThrow(`The card showed team "Sales"`);
   expect(asana.createProject({ name: "x", view: "timeline" })).rejects.toThrow("There is no view timeline");
   expect(asana.createProject({ name: "x", view: "board", view_choices: [{ gid: "board", name: "List" }] })).rejects.toThrow(`The card showed view "List"`);
-  // The card shows " t1"'s label; the write would go to "t1". Both must be checked.
-  expect(asana.createProject({ name: "x", team: " t1", team_choices: [{ gid: "t1", name: "Marketing" }, { gid: " t1", name: "Sales" }] })).rejects.toThrow(`The card showed team "Sales"`);
+  // The card matches the raw value: " t1" could show "Sales" while "t1" is Marketing.
+  expect(asana.createProject({ name: "x", team: " t1", team_choices: [{ gid: "t1", name: "Marketing" }, { gid: " t1", name: "Sales" }] })).rejects.toThrow("stray spaces");
   await Bun.sleep(0);
   expect(fake.calls.map((c) => c.slug)).not.toContain("ASANA_CREATE_A_PROJECT");
 });

@@ -2,8 +2,8 @@
  * Asana Tasks — the MCP server VoiceOS launches via run.sh (stdio; stdout is
  * the MCP wire, so log with console.error). Tools: create_task,
  * update_task, search_tasks, get_task, add_comment, complete_task,
- * create_project and create_goal, plus the agent-only helpers
- * list_asana_options and find_asana_tasks that feed the confirmation cards.
+ * create_project, create_goal and delete_project, plus the agent-only helpers
+ * list_asana_options, find_asana_tasks and find_asana_projects that feed the confirmation cards.
  *
  * Why one file: VoiceOS "Publish" ships only server.ts, widgetKit.ts,
  * voiceos.integration.json, package.json and icon.png. Every runtime line
@@ -279,6 +279,15 @@ const dueText = (raw: any) => {
 /** Asana's link to an object, or the gid-only form when the response left it out. */
 const linkOf = (raw: any) => raw.permalink_url || `https://app.asana.com/0/0/${raw.gid}`;
 
+/** How well `name` matches `q` (lowercase): 0 exact, 1 prefix, 2 substring, 3 all words, -1 no match. */
+function nameRank(name: string, q: string): number {
+  const n = name.toLowerCase();
+  if (n === q) return 0;
+  if (n.startsWith(q)) return 1;
+  if (n.includes(q)) return 2;
+  return q.split(/\s+/).every((word) => n.includes(word)) ? 3 : -1;
+}
+
 /** A pickable Asana object (workspace, project, section): its gid and display name. */
 export type Choice = { gid: string; name: string };
 
@@ -454,6 +463,14 @@ export const PROJECT_VIEWS: Choice[] = [
   { gid: "calendar", name: "Calendar" },
 ];
 
+/** A find_asana_projects match, shaped as delete_project's arguments. */
+export interface ProjectMatch {
+  project_gid: string;
+  project_name: string;
+  /** What deleting it takes along, as the card says it: "No tasks", "1 task", "12 tasks", "100+ tasks". */
+  tasks_deleted: string;
+}
+
 export interface CompleteResult {
   task: CreatedTask & { completed: boolean };
   /** False when the task already was in the wanted state (nothing written). */
@@ -528,9 +545,18 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     if (!gid) return;
     const actual = real.find((c) => c.gid === gid);
     if (!actual) throw new Error(`There is no ${kind} ${gid} in your Asana. Nothing was changed.`);
-    // The card matches the untrimmed value, so check every entry that trims to this gid.
-    const wrong = shown?.find((c) => String(c.gid).trim() === gid && c.name !== actual.name);
+    const wrong = shown?.find((c) => c.gid === gid && c.name !== actual.name);
     if (wrong) throw new Error(`The card showed ${kind} "${wrong.name}", but it is "${actual.name}". Nothing was changed.`);
+  }
+
+  /**
+   * A picked gid exactly as the card got it. The card matches the raw string, so
+   * padding (" " or " 123") would let it show one choice while a trimmed value
+   * writes another; only "" means "none".
+   */
+  function exactPick(kind: string, value: string | undefined): string | undefined {
+    if (value !== undefined && value !== value.trim()) throw new Error(`The ${kind} "${value}" has stray spaces. Nothing was changed.`);
+    return value;
   }
 
   /** The projects and My Tasks sections the confirmation cards offer as choices. */
@@ -584,8 +610,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   /** Creates the task assigned to the user, straight into the chosen My Tasks section. */
   async function createTask(input: NewTask): Promise<CreateResult> {
     const workspace = await resolveWorkspace();
-    const project = input.project?.trim();
-    const section = input.section?.trim();
+    const project = exactPick("project", input.project);
+    const section = exactPick("section", input.section);
     if (project || section) {
       const real = await listOptions();
       verifyPick("project", project, input.project_choices, real.projects);
@@ -625,15 +651,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     ]);
 
     const q = query.trim().toLowerCase();
-    const rank = (name: string) => {
-      const n = name.toLowerCase();
-      if (n === q) return 0;
-      if (n.startsWith(q)) return 1;
-      if (n.includes(q)) return 2;
-      return q.split(/\s+/).every((word) => n.includes(word)) ? 3 : -1;
-    };
     const tasks: TaskMatch[] = (tasksRes?.data ?? [])
-      .map((raw: any) => ({ raw, r: rank(String(raw.name ?? "")) }))
+      .map((raw: any) => ({ raw, r: nameRank(String(raw.name ?? ""), q) }))
       .filter((x: any) => x.r >= 0)
       .sort((a: any, b: any) => a.r - b.r)
       .slice(0, 5)
@@ -657,9 +676,9 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
 
   /** verifyPick for the list fields an update actually changes (fetches the real lists only when needed). */
   async function verifyUpdatePicks(input: TaskUpdate, live: any): Promise<void> {
-    const project = input.project?.trim();
-    const section = input.section?.trim();
-    const assignee = input.assignee?.trim();
+    const project = exactPick("project", input.project);
+    const section = exactPick("section", input.section);
+    const assignee = exactPick("assignee", input.assignee);
     const projectChanges = !!project && project !== (live.projects?.[0]?.gid ?? "");
     const sectionChanges = !!section && section !== (live.assignee_section?.gid ?? "");
     const assigneeChanges = !!assignee && assignee !== (live.assignee?.gid ?? "");
@@ -712,7 +731,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
         changed.push("due date");
       }
     }
-    const assignee = input.assignee?.trim();
+    const assignee = exactPick("assignee", input.assignee);
     const reassigned = assignee !== undefined && assignee !== (live.assignee?.gid ?? "");
     if (reassigned && assignee) {
       data.assignee = assignee;
@@ -720,7 +739,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     }
     // The My Tasks section belongs to the user's own list, so it only applies while the task stays theirs.
     const warnings: string[] = [];
-    const section = input.section?.trim();
+    const section = exactPick("section", input.section);
     if (section && section !== (live.assignee_section?.gid ?? "")) {
       if (reassigned) {
         warnings.push("the section was left as is because the task left your My Tasks");
@@ -744,7 +763,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
         warnings.push(`unassigning it failed: ${err?.message}`);
       }
     }
-    const project = input.project?.trim();
+    const project = exactPick("project", input.project);
     const currentProject = live.projects?.[0]?.gid ?? "";
     if (project !== undefined && project !== currentProject) {
       try {
@@ -932,8 +951,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   /** Creates a project in the workspace (in the chosen team, with the chosen default view). */
   async function createProject(input: NewProject): Promise<CreatedItem> {
     const workspace = await resolveWorkspace();
-    const team = input.team?.trim();
-    const view = input.view?.trim();
+    const team = exactPick("team", input.team);
+    const view = exactPick("view", input.view);
     if (team) verifyPick("team", team, input.team_choices, await listTeams());
     verifyPick("view", view, input.view_choices, PROJECT_VIEWS);
 
@@ -966,8 +985,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   async function createGoal(input: NewGoal): Promise<CreatedItem> {
     if (!opts.proxy) throw new Error("Creating goals is not available.");
     const workspace = await resolveWorkspace();
-    const owner = input.owner?.trim() || (await myTasks()).owner;
-    const period = input.time_period?.trim();
+    const owner = exactPick("owner", input.owner) || (await myTasks()).owner;
+    const period = exactPick("time period", input.time_period);
     verifyPick("owner", owner, input.owner_choices, await listUsers());
     if (period) verifyPick("time period", period, input.time_period_choices, await listTimePeriods());
 
@@ -990,9 +1009,59 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     };
   }
 
+  /**
+   * The tasks deleting a project takes along. Asana (a few seconds later) deletes
+   * the unassigned tasks that are in no other project; assigned ones stay in
+   * their assignee's My Tasks (checked against real Asana). Counted from the first 100.
+   */
+  async function tasksDeletedWith(project_gid: string): Promise<string> {
+    const res = await execute("ASANA_GET_TASKS_FROM_A_PROJECT", { project_gid, limit: 100, opt_fields: ["projects", "assignee"] });
+    const n = (res?.data ?? []).filter((t: any) => (t.projects ?? []).length <= 1 && !t.assignee).length;
+    if (res?.next_page) return `${n}+ tasks`;
+    return n === 0 ? "No tasks" : n === 1 ? "1 task" : `${n} tasks`;
+  }
+
+  /** Projects whose name matches `query` (best first, up to 5), each with what deleting it takes along. */
+  async function findProjects(query: string): Promise<{ projects: ProjectMatch[] }> {
+    const q = query.trim().toLowerCase();
+    const matches = (await listOptions(true)).projects
+      .map((p) => ({ p, r: nameRank(p.name, q) }))
+      .filter((x) => x.r >= 0)
+      .sort((a, b) => a.r - b.r)
+      .slice(0, 5);
+    const projects = await Promise.all(matches.map(async ({ p }) => ({
+      project_gid: p.gid, project_name: p.name, tasks_deleted: await tasksDeletedWith(p.gid),
+    })));
+    return { projects };
+  }
+
+  /**
+   * Deletes a project and the tasks only it holds. Irreversible, so the card's
+   * name and task count (both from the agent) must still be true right now.
+   */
+  async function deleteProject(input: ProjectMatch): Promise<CreatedItem> {
+    const project_gid = input.project_gid.trim();
+    const shown = input.project_name?.trim();
+    if (!shown) throw new Error("The card didn't say which project this is. Nothing was deleted.");
+    const [res, tasks] = await Promise.all([
+      execute("ASANA_GET_A_PROJECT", { project_gid, opt_fields: ["name"] }),
+      tasksDeletedWith(project_gid),
+    ]);
+    const live = res?.data;
+    if (!live?.gid) throw new Error("Asana returned no project for that ID. Nothing was deleted.");
+    if (shown.toLowerCase() !== String(live.name ?? "").trim().toLowerCase()) {
+      throw new Error(`The card showed project "${shown}", but that project is "${live.name}". Nothing was deleted.`);
+    }
+    if (input.tasks_deleted?.trim() !== tasks) {
+      throw new Error(`The card said "${input.tasks_deleted}", but it would delete ${tasks.toLowerCase()} now. Nothing was deleted.`);
+    }
+    await execute("ASANA_DELETE_PROJECT", { project_gid });
+    return { gid: project_gid, name: String(live.name), notes: "", due: "", details: [`${tasks} deleted`], permalink_url: "" };
+  }
+
   return {
     resolveWorkspace, listOptions, optionsFor, createTask, findTasks, updateTask, searchTasks, getTask,
-    addComment, setCompleted, completeFromCard, createProject, createGoal,
+    addComment, setCompleted, completeFromCard, createProject, createGoal, findProjects, deleteProject,
   };
 }
 
@@ -1531,18 +1600,18 @@ export function commentCard({ task, comment }: CommentResult): RenderedWidget {
   return renderCustom({ accent: ACCENT, css: CSS, body, height: 150 });
 }
 
-/** create_project / create_goal's result: what was made, its due date and key facts. */
-export function itemCard(kind: "PROJECT" | "GOAL", item: CreatedItem): RenderedWidget {
+/** create_project / create_goal's result (and delete_project's, with its own status): the item, its due date and key facts. */
+export function itemCard(kind: "PROJECT" | "GOAL", item: CreatedItem, status = "Created in Asana"): RenderedWidget {
   const pills = [
     item.due ? `<div class="as-pill as-due">${CALENDAR_ICON}<span>${esc(friendlyDue(item.due))}</span></div>` : "",
-    ...item.details.map((d) => `<div class="as-pill">${esc(clip(d, 26))}</div>`),
+    ...item.details.map((d) => `<div class="as-pill">${esc(clip(d, 32))}</div>`),
   ].join("");
   const body = `
     <div class="as">
       <div class="as-head">
         ${markHtml()}
         <span class="as-chip">${kind}</span>
-        <span class="as-tag as-success">Created in Asana</span>
+        <span class="as-tag as-success">${esc(status)}</span>
       </div>
       <div class="as-card">
         <div class="as-title">${esc(clip(item.name, 90))}</div>
@@ -1901,6 +1970,33 @@ async function main(): Promise<void> {
       const goal = await asana.createGoal(args);
       return { success: true, goal, _voiceos_glance: glance(itemCard("GOAL", goal)) };
     }, "GOAL"),
+  );
+  server.registerTool(
+    "find_asana_projects",
+    {
+      title: "Find Asana projects",
+      description: "Find Asana projects by name, each with what deleting it would take along (its unassigned tasks that are in no other project). Returns up to 5 matches, already shaped as delete_project arguments. Always call this before delete_project. If several projects match, ask the user which one they mean.",
+      inputSchema: { query: z.string().describe("Words from the project's name") } as any,
+    },
+    // No glance card: a silent lookup step before delete_project's confirmation card.
+    guarded("find_asana_projects", null, async (args: { query: string }) => asana.findProjects(args.query)),
+  );
+
+  server.registerTool(
+    "delete_project",
+    {
+      title: "Delete project",
+      description: "Permanently delete an Asana project, together with its unassigned tasks that are in no other project (assigned tasks stay in their assignee's My Tasks). Use only when the user explicitly asks to delete or remove a project (not to archive or complete it). First call find_asana_projects and pass the user's match unchanged: project_gid, project_name and tasks_deleted.",
+      inputSchema: {
+        project_gid: z.string().describe("The project's gid from find_asana_projects"),
+        project_name: z.string().describe("The project's exact name, shown on the confirmation card"),
+        tasks_deleted: z.string().describe("tasks_deleted from find_asana_projects, unchanged (shown on the card and re-checked)"),
+      } as any,
+    },
+    guarded("delete_project", (a) => a.project_name || "Delete project", async (args: ProjectMatch) => {
+      const project = await asana.deleteProject(args);
+      return { success: true, deleted: project, _voiceos_glance: glance(itemCard("PROJECT", project, "Deleted")) };
+    }, "PROJECT"),
   );
   await server.connect(new StdioServerTransport());
 }

@@ -187,6 +187,14 @@ test("a pick the card labeled wrongly is refused before any write", async () => 
   expect(update(unknown, { assignee: "u404" })).rejects.toThrow("There is no assignee u404");
 });
 
+test("a blank-looking pick (\" \") is refused: the card shows its label, a trim would clear the field", async () => {
+  const fake = fakeAsana();
+  const padded = update(fake, { project: " ", project_choices: [{ gid: " ", name: "Launch" }] });
+  expect(padded).rejects.toThrow("stray spaces");
+  await padded.catch(() => {});
+  expect(fake.writes()).toEqual([]);
+});
+
 test("a plain edit reads the task once: the update call returns the new state", async () => {
   const fake = fakeAsana();
   const result = await update(fake, { name: "Call Eric today", due_on: "2026-11-02" });

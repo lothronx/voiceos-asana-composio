@@ -1,6 +1,6 @@
 /**
  * Builds the confirmation cards (create_task, update_task, create_project,
- * create_goal, add_comment, complete_task) and writes them into voiceos.integration.json
+ * create_goal, delete_project, add_comment, complete_task) and writes them into voiceos.integration.json
  * (tools[name].confirmation.root):
  *
  *   card.css   how they look
@@ -61,8 +61,8 @@ const menuRow = (key: string, label: string, none: string) => `
 const page = (rows: string) => `<div class="as">\n${rows}\n</div>`;
 
 /**
- * For the simple cards: shows the task the action targets (read-only — the
- * server re-checks it) and, on complete_task, whether it completes or reopens.
+ * For the simple cards: shows the task or project the action targets (read-only —
+ * the server re-checks it) and, on complete_task, whether it completes or reopens.
  * Runs before the kit's bridge, which then fills the editable [data-voiceos-key] fields.
  */
 const SIMPLE_SCRIPT = `(function(){
@@ -109,6 +109,18 @@ ${dueRowFor(false)}
 ${menuRow("owner", "Owner", "Me")}
 ${menuRow("time_period", "Period", "No time period")}`),
     height: 260,
+  },
+  // Irreversible: the card says what goes with the project; the server re-checks name and count.
+  delete_project: {
+    markup: page(`<div class="as-head">${markHtml()}<span class="as-chip as-chip-danger">Delete project</span></div>
+<div class="as-target"><span class="as-target-name" data-arg="project_name"></span></div>
+<div class="as-warn" role="alert">
+<div class="as-warn-title"><span data-arg="tasks_deleted"></span> will be deleted with it</div>
+<div>Tasks with an assignee or in another project are kept.</div>
+<div>This can't be undone.</div>
+</div>`),
+    height: 185,
+    script: SIMPLE_SCRIPT,
   },
   add_comment: {
     markup: page(`<div class="as-head">${markHtml()}<span class="as-chip">Add comment</span></div>
