@@ -1,6 +1,6 @@
 /**
- * Builds the confirmation cards (create_task, update_task, add_comment,
- * complete_task) and writes them into voiceos.integration.json
+ * Builds the confirmation cards (create_task, update_task, create_project,
+ * create_goal, add_comment, complete_task) and writes them into voiceos.integration.json
  * (tools[name].confirmation.root):
  *
  *   card.css   how they look
@@ -25,22 +25,28 @@ const calIcon = `<svg class="as-ic" width="13" height="13" viewBox="0 0 14 14" f
 // data-voiceos-key binds an element to a tool argument (see card.js).
 // Popovers sit right after their row; card.js positions them absolutely.
 
-const header = (chip: string) => `<div class="as-head">${markHtml()}<span class="as-chip">${chip}</span></div>
-<input class="as-title" data-voiceos-key="name" placeholder="Task name" spellcheck="false" autocomplete="off" />`;
+const header = (chip: string, placeholder = "Task name") => `<div class="as-head">${markHtml()}<span class="as-chip">${chip}</span></div>
+<input class="as-title" data-voiceos-key="name" placeholder="${placeholder}" spellcheck="false" autocomplete="off" />`;
 
 /** The description, a quiet two-line field under the title (bound to `notes`). */
 const notesField = `<textarea class="as-notes" data-voiceos-key="notes" rows="2" placeholder="Add a description" spellcheck="false"></textarea>`;
 
 /** Due date + time on one row (70/30), with the calendar and time-list popovers. */
-const dueRow = `
+const dueRow = dueRowFor(true);
+
+/** The due row; projects and goals have a date only (no time button, no time list). */
+function dueRowFor(withTime: boolean): string {
+  const timeButton = withTime ? `<button type="button" class="as-val as-time" data-menu="due_time" data-none="No time" aria-expanded="false" aria-label="Due time" hidden><span></span>${chevron}</button>` : "";
+  return `
 <input type="hidden" id="as-due_on" data-voiceos-key="due_on" />
-<input type="hidden" id="as-due_time" data-voiceos-key="due_time" />
-<div class="as-row"><span class="as-lbl">Due</span><button type="button" class="as-val" data-menu="cal" id="as-due-btn" aria-expanded="false" aria-haspopup="dialog">${calIcon}<span></span>${chevron}</button><button type="button" class="as-val as-time" data-menu="due_time" data-none="No time" aria-expanded="false" aria-label="Due time" hidden><span></span>${chevron}</button></div>
+${withTime ? `<input type="hidden" id="as-due_time" data-voiceos-key="due_time" />` : ""}
+<div class="as-row"><span class="as-lbl">Due</span><button type="button" class="as-val" data-menu="cal" id="as-due-btn" aria-expanded="false" aria-haspopup="dialog">${calIcon}<span></span>${chevron}</button>${timeButton}</div>
 <div class="as-pop" id="as-pop-cal" role="dialog" aria-label="Due date" hidden>
 <div class="as-quick"><button type="button" class="as-c" data-q="today">Today</button><button type="button" class="as-c" data-q="tomorrow">Tomorrow</button><button type="button" class="as-c" data-q="mon">Next Mon</button><button type="button" class="as-clear" id="as-clear">Clear</button></div>
 <div class="as-calh"><button type="button" id="as-prev" aria-label="Previous month">&lsaquo;</button><span id="as-month"></span><button type="button" id="as-next" aria-label="Next month">&rsaquo;</button></div><div class="as-grid" id="as-grid"></div>
 </div>
-<div class="as-pop" id="as-pop-due_time" hidden><div class="as-list" role="listbox" aria-label="Due time"></div></div>`;
+${withTime ? `<div class="as-pop" id="as-pop-due_time" hidden><div class="as-list" role="listbox" aria-label="Due time"></div></div>` : ""}`;
+}
 
 /**
  * A list-backed field: a hidden input bound to the tool argument `key`, the
@@ -87,6 +93,22 @@ ${menuRow("assignee", "Assignee", "Unassigned")}
 ${menuRow("project", "Project", "No project")}
 ${menuRow("section", "Section", "Keep section")}`),
     height: 310,
+  },
+  create_project: {
+    markup: page(`${header("New project", "Project name")}
+${notesField}
+${dueRowFor(false)}
+${menuRow("team", "Team", "No team")}
+${menuRow("view", "View", "Default (List)")}`),
+    height: 260,
+  },
+  create_goal: {
+    markup: page(`${header("New goal", "Goal name")}
+${notesField}
+${dueRowFor(false)}
+${menuRow("owner", "Owner", "Me")}
+${menuRow("time_period", "Period", "No time period")}`),
+    height: 260,
   },
   add_comment: {
     markup: page(`<div class="as-head">${markHtml()}<span class="as-chip">Add comment</span></div>

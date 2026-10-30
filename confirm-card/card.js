@@ -52,7 +52,7 @@
     menus[key] = [{ v: '', l: btn.getAttribute('data-none') || 'None' }];
     if (key !== 'due_time') listKeys.push(key);
   });
-  for (var h = 0; h < 24; h++) {
+  for (var h = 0; menus.due_time && h < 24; h++) {
     for (var m = 0; m < 60; m += 30) {
       var t = pad(h) + ':' + pad(m);
       menus.due_time.push({ v: t, l: clock(t) });
@@ -169,13 +169,13 @@
       grid.appendChild(b);
     }
 
-    renderMenu('due_time');
+    if (menus.due_time) renderMenu('due_time'); /* date-only cards have no time field */
   }
 
   /** Set (or clear with '') the due date. Clearing the date also clears its time. */
   function setDate(v) {
     stage($('as-due_on'), v);
-    if (!v && $('as-due_time').value) stage($('as-due_time'), '');
+    if (!v && $('as-due_time') && $('as-due_time').value) stage($('as-due_time'), '');
     renderDate();
   }
 
@@ -240,9 +240,9 @@
       });
       ensure(key, a[key] ? String(a[key]) : '');
     });
-    ensure('due_time', a.due_time ? String(a.due_time) : '', a.due_time ? clock(String(a.due_time)) : '');
+    if (menus.due_time) ensure('due_time', a.due_time ? String(a.due_time) : '', a.due_time ? clock(String(a.due_time)) : '');
 
-    ['due_on', 'due_time'].concat(listKeys).forEach(function (k) {
+    ['due_on', 'due_time'].concat(listKeys).filter(function (k) { return $('as-' + k); }).forEach(function (k) {
       $('as-' + k).value = a[k] == null ? '' : String(a[k]);
     });
     var d = parse(a.due_on);

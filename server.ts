@@ -1,7 +1,8 @@
 /**
  * Asana Tasks — the MCP server VoiceOS launches via run.sh (stdio; stdout is
  * the MCP wire, so log with console.error). Tools: create_task,
- * update_task, search_tasks, get_task, add_comment and complete_task, plus the agent-only helpers
+ * update_task, search_tasks, get_task, add_comment, complete_task,
+ * create_project and create_goal, plus the agent-only helpers
  * list_asana_options and find_asana_tasks that feed the confirmation cards.
  *
  * Why one file: VoiceOS "Publish" ships only server.ts, widgetKit.ts,
@@ -382,6 +383,48 @@ export interface CommentResult {
   comment: { author: string; text: string; created_at: string };
 }
 
+/** create_project's arguments ("" = Asana's default). */
+export interface NewProject {
+  name: string;
+  notes?: string;
+  due_on?: string;
+  team?: string;
+  /** "list" | "board" | "calendar" */
+  view?: string;
+  team_choices?: Choice[];
+  view_choices?: Choice[];
+}
+
+/** create_goal's arguments ("" = Asana's default; owner defaults to the user). */
+export interface NewGoal {
+  name: string;
+  notes?: string;
+  due_on?: string;
+  owner?: string;
+  time_period?: string;
+  owner_choices?: Choice[];
+  time_period_choices?: Choice[];
+}
+
+/** What the model narrates and the project / goal result cards show. */
+export interface CreatedItem {
+  gid: string;
+  name: string;
+  notes: string;
+  due: string;
+  /** Short facts for the card, e.g. ["Team: Marketing", "Board view"]. */
+  details: string[];
+  /** "" when Asana gives no link (goals). */
+  permalink_url: string;
+}
+
+/** The project views create_project offers; Asana's default is list. */
+export const PROJECT_VIEWS: Choice[] = [
+  { gid: "list", name: "List" },
+  { gid: "board", name: "Board" },
+  { gid: "calendar", name: "Calendar" },
+];
+
 export interface CompleteResult {
   task: CreatedTask & { completed: boolean };
   /** False when the task already was in the wanted state (nothing written). */
@@ -478,6 +521,37 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     const workspace = await resolveWorkspace();
     return toChoices((await execute("ASANA_GET_USERS_FOR_WORKSPACE", { workspace_gid: workspace.gid, opt_fields: ["name"] }))?.data);
   });
+
+  /** Teams a project can belong to (required on organization workspaces). */
+  const listTeams = cached(LISTS_TTL_MS, async (): Promise<Choice[]> => {
+    const workspace = await resolveWorkspace();
+    return toChoices((await execute("ASANA_GET_TEAMS_IN_WORKSPACE", { workspace_gid: workspace.gid }))?.data);
+  });
+
+  /** Goal time periods that haven't ended and start within a year (Asana keeps many years of them). */
+  const listTimePeriods = cached(LISTS_TTL_MS, async (): Promise<Choice[]> => {
+    const workspace = await resolveWorkspace();
+    const all = (await execute("ASANA_GET_TIME_PERIODS", { workspace_gid: workspace.gid, opt_fields: ["display_name", "start_on", "end_on"] }))?.data ?? [];
+    const today = localDue({ due_at: new Date().toISOString() }).due_on;
+    const yearOut = `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`;
+    return all
+      .filter((p: any) => String(p.end_on) >= today && String(p.start_on) <= yearOut)
+      .sort((a: any, b: any) => String(a.start_on).localeCompare(String(b.start_on)) || String(a.end_on).localeCompare(String(b.end_on)))
+      .map((p: any) => ({ gid: String(p.gid), name: String(p.display_name) }));
+  });
+
+  /**
+   * The choices a confirmation card offers, per kind of thing being made.
+   * Always fresh: this is the explicit lookup right before the card.
+   */
+  async function optionsFor(kind: "task" | "project" | "goal") {
+    if (kind === "project") return { team_choices: await listTeams(true), view_choices: PROJECT_VIEWS };
+    if (kind === "goal") {
+      const [owner_choices, time_period_choices] = await Promise.all([listUsers(true), listTimePeriods(true)]);
+      return { owner_choices, time_period_choices };
+    }
+    return listOptions(true);
+  }
 
   /** Creates the task assigned to the user, straight into the chosen My Tasks section. */
   async function createTask(input: NewTask): Promise<CreateResult> {
@@ -860,7 +934,71 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     return completeResult(t, !!t.completed, true);
   }
 
-  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask, searchTasks, getTask, addComment, setCompleted, completeFromCard };
+  /** Creates a project in the workspace (in the chosen team, with the chosen default view). */
+  async function createProject(input: NewProject): Promise<CreatedItem> {
+    const workspace = await resolveWorkspace();
+    const team = input.team?.trim();
+    const view = input.view?.trim();
+    if (team) verifyPick("team", team, input.team_choices, await listTeams());
+    verifyPick("view", view, input.view_choices, PROJECT_VIEWS);
+
+    const data: Record<string, unknown> = { name: input.name, workspace: workspace.gid };
+    const notes = input.notes?.trim();
+    if (notes) data.notes = notes;
+    if (input.due_on?.trim()) data.due_on = dueFields(input.due_on.trim()).due_on;
+    if (team) data.team = team;
+    if (view) data.default_view = view;
+
+    const p = (await execute("ASANA_CREATE_A_PROJECT", { data, opt_fields: ["name", "notes", "due_on", "default_view", "team.name", "permalink_url"] }))?.data;
+    if (!p?.gid) throw new Error("Asana returned no project ID — the project may not have been created.");
+    return {
+      gid: String(p.gid),
+      name: String(p.name ?? input.name),
+      notes: String(p.notes ?? ""),
+      due: String(p.due_on ?? ""),
+      details: [
+        p.team?.name ? `Team: ${p.team.name}` : "",
+        `${PROJECT_VIEWS.find((v) => v.gid === p.default_view)?.name ?? "List"} view`,
+      ].filter(Boolean),
+      permalink_url: p.permalink_url || `https://app.asana.com/0/${p.gid}`,
+    };
+  }
+
+  /**
+   * Creates a workspace goal. Composio has no typed create-goal tool, so this
+   * goes through its proxy to Asana's own POST /goals.
+   */
+  async function createGoal(input: NewGoal): Promise<CreatedItem> {
+    if (!opts.proxy) throw new Error("Creating goals is not available.");
+    const workspace = await resolveWorkspace();
+    const owner = input.owner?.trim() || (await myTasks()).owner;
+    const period = input.time_period?.trim();
+    verifyPick("owner", owner, input.owner_choices, await listUsers());
+    if (period) verifyPick("time period", period, input.time_period_choices, await listTimePeriods());
+
+    const data: Record<string, unknown> = { name: input.name, workspace: workspace.gid, owner };
+    const notes = input.notes?.trim();
+    if (notes) data.notes = notes;
+    if (input.due_on?.trim()) data.due_on = dueFields(input.due_on.trim()).due_on;
+    if (period) data.time_period = period;
+
+    const res = await opts.proxy("asana", "POST", "https://app.asana.com/api/1.0/goals?opt_fields=name,notes,due_on,owner.name,time_period.display_name", { data });
+    const g = res?.data;
+    if (!g?.gid) throw new Error("Asana returned no goal ID — the goal may not have been created.");
+    return {
+      gid: String(g.gid),
+      name: String(g.name ?? input.name),
+      notes: String(g.notes ?? ""),
+      due: String(g.due_on ?? ""),
+      details: [g.owner?.name ? `Owner: ${g.owner.name}` : "", g.time_period?.display_name ?? ""].filter(Boolean),
+      permalink_url: "",
+    };
+  }
+
+  return {
+    resolveWorkspace, listOptions, optionsFor, createTask, findTasks, updateTask, searchTasks, getTask,
+    addComment, setCompleted, completeFromCard, createProject, createGoal,
+  };
 }
 
 // ============================================================================
@@ -1398,13 +1536,39 @@ export function commentCard({ task, comment }: CommentResult): RenderedWidget {
   return renderCustom({ accent: ACCENT, css: CSS, body, height: 150 });
 }
 
-/** The card when a tool failed; the message is the same text the model gets. */
-export function errorCard(title: string, message: string): RenderedWidget {
+/** create_project / create_goal's result: what was made, its due date and key facts. */
+export function itemCard(kind: "PROJECT" | "GOAL", item: CreatedItem): RenderedWidget {
+  const pills = [
+    item.due ? `<div class="as-pill as-due">${CALENDAR_ICON}<span>${esc(friendlyDue(item.due))}</span></div>` : "",
+    ...item.details.map((d) => `<div class="as-pill">${esc(clip(d, 26))}</div>`),
+  ].join("");
   const body = `
     <div class="as">
       <div class="as-head">
         ${markHtml()}
-        <span class="as-chip">MY TASKS</span>
+        <span class="as-chip">${kind}</span>
+        <span class="as-tag as-success">Created in Asana</span>
+      </div>
+      <div class="as-card">
+        <div class="as-title">${esc(clip(item.name, 90))}</div>
+        ${item.notes ? `<div class="as-desc" style="padding-left:0">${esc(clip(item.notes, 160))}</div>` : ""}
+      </div>
+      <div class="as-meta">
+        ${pills}
+        ${item.permalink_url ? `<a class="as-link" href="${esc(item.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>` : ""}
+      </div>
+    </div>
+  `;
+  return renderCustom({ accent: ACCENT, css: CSS, body, height: item.notes ? 160 : 130 });
+}
+
+/** The card when a tool failed; the message is the same text the model gets. */
+export function errorCard(title: string, message: string, chip = "MY TASKS"): RenderedWidget {
+  const body = `
+    <div class="as">
+      <div class="as-head">
+        ${markHtml()}
+        <span class="as-chip">${chip}</span>
         <span class="as-tag as-err">Action Failed</span>
       </div>
       <div class="as-card as-card-err">
@@ -1453,7 +1617,7 @@ export async function describeError(
 ): Promise<{ error: string; reconnect: boolean }> {
   // A timed-out create may still have reached Asana; retrying blindly would duplicate the task.
   if (err?.name === "TimeoutError") {
-    return { error: "Composio did not answer in time. The task may still have been created — check Asana before retrying.", reconnect: false };
+    return { error: "Composio did not answer in time. It may still have gone through — check Asana before retrying.", reconnect: false };
   }
   if (isConnectionError(err)) {
     // Ask Composio why, so the message can say "expired" vs "never connected" vs "revoked".
@@ -1499,14 +1663,14 @@ async function main(): Promise<void> {
    * and turned into plain words (with an error card unless the tool is a
    * silent helper, `cardTitle` null).
    */
-  const guarded = <A,>(tool: string, cardTitle: ((args: A) => string) | null, body: (args: A) => Promise<unknown>) =>
+  const guarded = <A,>(tool: string, cardTitle: ((args: A) => string) | null, body: (args: A) => Promise<unknown>, chip?: string) =>
     async (args: A) => {
       try {
         return textResult(await body(args));
       } catch (err) {
         console.error(`${tool} failed:`, err);
         const { error, reconnect } = await describeError(err, linkStatus, userId);
-        const card = cardTitle ? { _voiceos_glance: glance(errorCard(cardTitle(args), error)) } : {};
+        const card = cardTitle ? { _voiceos_glance: glance(errorCard(cardTitle(args), error, chip)) } : {};
         return textResult({ error, reconnect, ...card }, true);
       }
     };
@@ -1514,14 +1678,14 @@ async function main(): Promise<void> {
   server.registerTool(
     "list_asana_options",
     {
-      title: "List Asana projects and sections",
-      description: "List the user's Asana projects and their My Tasks sections (e.g. Recently assigned / Today / Next week / Later — users can rename or add their own). Always call this right before create_task and pass the results as project_choices and section_choices. Also use when the user asks which Asana projects or My Tasks sections they have.",
-      inputSchema: {} as any,
+      title: "List Asana choices",
+      description: "Get the choices a confirmation card offers. Always call this right before create_task (kind \"task\": projects and My Tasks sections — users can rename or add sections), create_project (kind \"project\": team_choices, view_choices) or create_goal (kind \"goal\": owner_choices, time_period_choices), and pass the results through to that tool. Also use when the user asks which projects or My Tasks sections they have.",
+      inputSchema: {
+        kind: z.enum(["task", "project", "goal"]).optional().describe("What is about to be created; default task"),
+      } as any,
     },
-    // No glance card: this is a silent lookup step before create_task's confirmation card.
-    guarded("list_asana_options", null, async () => {
-      return await asana.listOptions(true);
-    }),
+    // No glance card: this is a silent lookup step before a confirmation card.
+    guarded("list_asana_options", null, async (args: { kind?: "task" | "project" | "goal" }) => asana.optionsFor(args.kind ?? "task")),
   );
 
   const choiceSchema = z.array(z.object({ gid: z.string(), name: z.string() }));
@@ -1700,6 +1864,48 @@ async function main(): Promise<void> {
       }
       return { success: true, ...(await asana.completeFromCard(args.task_gid, args.completed !== false)) };
     }),
+  );
+
+  server.registerTool(
+    "create_project",
+    {
+      title: "Create project",
+      description: "Create a new project in the user's Asana workspace. Use when the user asks to create, start or set up a project. First call list_asana_options with kind \"project\" and pass its team_choices and view_choices. Set team / view only when the user named one (or the workspace needs a team), using its gid.",
+      inputSchema: {
+        name: z.string().describe("Project name"),
+        notes: z.string().optional().describe("Optional project description"),
+        due_on: z.string().optional().describe("Optional due date, YYYY-MM-DD"),
+        team: z.string().optional().describe("Team gid from team_choices"),
+        view: z.string().optional().describe("Default view gid from view_choices: list, board or calendar"),
+        team_choices: choiceSchema.optional().describe("team_choices from list_asana_options, passed through unchanged"),
+        view_choices: choiceSchema.optional().describe("view_choices from list_asana_options, passed through unchanged"),
+      } as any,
+    },
+    guarded("create_project", (a) => a.name || "New project", async (args: NewProject) => {
+      const project = await asana.createProject(args);
+      return { success: true, project, _voiceos_glance: glance(itemCard("PROJECT", project)) };
+    }, "PROJECT"),
+  );
+
+  server.registerTool(
+    "create_goal",
+    {
+      title: "Create goal",
+      description: "Create a new goal in the user's Asana workspace. Use when the user asks to create, set or add a goal, objective or OKR. First call list_asana_options with kind \"goal\" and pass its owner_choices and time_period_choices. The owner defaults to the user; set time_period only when the user named one (e.g. \"this quarter\"), using its gid.",
+      inputSchema: {
+        name: z.string().describe("Goal name"),
+        notes: z.string().optional().describe("Optional goal description"),
+        due_on: z.string().optional().describe("Optional due date, YYYY-MM-DD"),
+        owner: z.string().optional().describe("Owner user gid from owner_choices; default the user"),
+        time_period: z.string().optional().describe("Time period gid from time_period_choices"),
+        owner_choices: choiceSchema.optional().describe("owner_choices from list_asana_options, passed through unchanged"),
+        time_period_choices: choiceSchema.optional().describe("time_period_choices from list_asana_options, passed through unchanged"),
+      } as any,
+    },
+    guarded("create_goal", (a) => a.name || "New goal", async (args: NewGoal) => {
+      const goal = await asana.createGoal(args);
+      return { success: true, goal, _voiceos_glance: glance(itemCard("GOAL", goal)) };
+    }, "GOAL"),
   );
   await server.connect(new StdioServerTransport());
 }

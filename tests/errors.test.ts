@@ -24,7 +24,7 @@ test("a rejected Composio API key points at the key settings, not at reconnectin
   });
 });
 
-test("a timeout warns that the task may already exist", async () => {
+test("a timeout warns that the write may already have gone through", async () => {
   const timeout = Object.assign(new Error("timed out"), { name: "TimeoutError" });
-  expect((await describeError(timeout, linkStatus("ACTIVE"), "u")).error).toContain("may still have been created");
+  expect((await describeError(timeout, linkStatus("ACTIVE"), "u")).error).toContain("may still have gone through");
 });
