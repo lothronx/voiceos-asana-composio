@@ -1,6 +1,6 @@
 /**
  * Builds create_task's confirmation card and writes it into
- * voiceos.integration.json (tools[create_task].confirmation.root.html).
+ * voiceos.integration.json (tools[create_task].confirmation.root):
  *
  *   card.css   how it looks
  *   card.js    how it behaves (date/time pickers, project/section lists)
@@ -48,7 +48,7 @@ ${menuRow("section", "Section")}
 </div>`;
 
 // The card script must run before widgetKit's bridge script, which renderCustom appends after the body.
-const card = renderCustom({
+const createTaskCard = renderCustom({
   accent: "#f06a6a",
   css: read("card.css"),
   body: `${markup}\n<script>${read("card.js")}</script>`,
@@ -57,8 +57,9 @@ const card = renderCustom({
 });
 
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-const tool = manifest.tools.find((t: any) => t.name === "create_task");
-tool.confirmation.root.html = card.html;
-tool.confirmation.root.height = card.height;
+const root = manifest.tools.find((t: any) => t.name === "create_task")?.confirmation?.root;
+if (!root) throw new Error("create_task has no confirmation card in the manifest");
+root.html = createTaskCard.html;
+root.height = createTaskCard.height;
+console.log(`create_task confirmation card: ${createTaskCard.html.length} chars, height ${createTaskCard.height}`);
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-console.log(`confirmation card: ${card.html.length} chars, height ${card.height}`);

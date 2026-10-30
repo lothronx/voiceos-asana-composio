@@ -182,8 +182,8 @@ export function successCard({ task, warning }: CreateResult): RenderedWidget {
   return renderCustom({ accent: ACCENT, css: CSS, body, height: 135 });
 }
 
-/** The card when create_task failed; the message is the same text the model gets. */
-export function errorCard(taskName: string, message: string): RenderedWidget {
+/** The card when a tool failed; the message is the same text the model gets. */
+export function errorCard(title: string, message: string): RenderedWidget {
   const body = `
     <div class="as">
       <div class="as-head">
@@ -194,15 +194,11 @@ export function errorCard(taskName: string, message: string): RenderedWidget {
       <div class="as-card as-card-err">
         <div class="as-trow">
           <div class="as-ring">${ALERT_ICON}</div>
-          <div class="as-title">${esc(clip(taskName || "New Task", 60))}</div>
+          <div class="as-title">${esc(clip(title, 60))}</div>
         </div>
         <div class="as-err-msg">${esc(clip(message, 180))}</div>
       </div>
-      <div class="as-meta">
-        <div class="as-pill">My Tasks</div>
-        <div class="as-pill">Verify Composio connection</div>
-      </div>
     </div>
   `;
-  return renderCustom({ accent: ACCENT, css: CSS, body, height: 168 });
+  return renderCustom({ accent: ACCENT, css: CSS, body, height: 140 });
 }

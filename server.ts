@@ -4,7 +4,8 @@
  *
  *   src/composio.ts  HTTP client for Composio
  *   src/asana.ts     Asana operations on top of it
- *   src/cards.ts     the notch cards for create_task's result
+ *   src/connection.ts  the Asana link's status (linking happens in the Composio dashboard)
+ *   src/cards.ts     the notch cards shown after create_task runs
  *
  * Tool names, descriptions and input schemas must stay identical to
  * voiceos.integration.json — VoiceOS routes and confirms from the manifest.
@@ -12,19 +13,22 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { createComposioExecutor } from "./src/composio.ts";
+import { loadEnvFile } from "./src/env.ts";
+import { ComposioError, createComposio, isConnectionError } from "./src/composio.ts";
 import { createAsana, type NewTask } from "./src/asana.ts";
+import { createAsanaConnection } from "./src/connection.ts";
 import { errorCard, glance, successCard } from "./src/cards.ts";
 
-// Settings the user entered in VoiceOS arrive as env vars named after each manifest preference.
-const asana = createAsana(
-  createComposioExecutor({
-    apiKey: process.env.COMPOSIO_API_KEY?.trim(),
-    userId: process.env.COMPOSIO_ENTITY_ID?.trim() || "default",
-  }),
-  { workspaceGid: process.env.ASANA_WORKSPACE_GID?.trim() || undefined },
-);
+// Composio credentials are the developer's, not the end user's: they live in .env next to
+// this file (see .env.example), never in VoiceOS setup fields.
+loadEnvFile(fileURLToPath(new URL(".env", import.meta.url)));
+
+const userId = process.env.COMPOSIO_USER_ID?.trim() || "default";
+const composio = createComposio({ apiKey: process.env.COMPOSIO_API_KEY?.trim(), userId });
+const asana = createAsana(composio.execute, { workspaceGid: process.env.ASANA_WORKSPACE_GID?.trim() || undefined });
+const connection = createAsanaConnection(composio.request, userId);
 
 const server = new McpServer({ name: "asana-tasks", version: "1.0.0" });
 
@@ -34,13 +38,30 @@ const textResult = (payload: unknown, isError = false) => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload) }],
 });
 
-/** Turns a failure into words the user can act on. */
-function describeError(err: any): string {
+// Where whoever owns the Composio project links the Asana account (once, via OAuth2).
+const DASHBOARD = "platform.composio.dev → Connected accounts";
+
+/**
+ * Turns a failure into words the user can act on. `reconnect` is true when
+ * linking Asana again in the Composio dashboard is the fix.
+ */
+async function describeError(err: any): Promise<{ error: string; reconnect: boolean }> {
   // A timed-out create may still have reached Asana; retrying blindly would duplicate the task.
   if (err?.name === "TimeoutError") {
-    return "Composio did not answer in time. The task may still have been created — check Asana before retrying.";
+    return { error: "Composio did not answer in time. The task may still have been created — check Asana before retrying.", reconnect: false };
   }
-  return err?.message || "Network error while connecting to Composio.";
+  if (isConnectionError(err)) {
+    // Ask Composio why, so the message can say "expired" vs "never connected" vs "revoked".
+    const status = await connection.status().catch(() => "UNKNOWN");
+    const why = status === "NONE" || status === "INITIALIZING" || status === "INITIATED" ? "Asana isn't connected yet."
+      : status === "EXPIRED" ? "The Asana connection has expired."
+      : "Asana access was revoked or disabled.";
+    return { error: `${why} Connect Asana for Composio user "${userId}" in ${DASHBOARD}.`, reconnect: true };
+  }
+  if (err instanceof ComposioError && err.source === "composio" && err.status === 401) {
+    return { error: "The Composio API key was rejected — check COMPOSIO_API_KEY in this integration's .env.", reconnect: false };
+  }
+  return { error: err?.message || "Network error while connecting to Composio.", reconnect: false };
 }
 
 server.registerTool(
@@ -51,7 +72,14 @@ server.registerTool(
     inputSchema: {} as any,
   },
   // No glance card: this is a silent lookup step before create_task's confirmation card.
-  async () => textResult(await asana.listOptions()),
+  async () => {
+    try {
+      return textResult(await asana.listOptions());
+    } catch (err) {
+      console.error("list_asana_options failed:", err);
+      return textResult(await describeError(err), true);
+    }
+  },
 );
 
 const choiceSchema = z.array(z.object({ gid: z.string(), name: z.string() }));
@@ -78,8 +106,9 @@ server.registerTool(
       return textResult({ success: true, ...result, _voiceos_glance: glance(successCard(result)) });
     } catch (err: any) {
       console.error("create_task failed:", err);
-      const error = describeError(err);
-      return textResult({ error, taskName: args.name, _voiceos_glance: glance(errorCard(args.name, error)) }, true);
+      const { error, reconnect } = await describeError(err);
+      const card = errorCard(args.name || "New Task", error);
+      return textResult({ error, reconnect, taskName: args.name, _voiceos_glance: glance(card) }, true);
     }
   },
 );

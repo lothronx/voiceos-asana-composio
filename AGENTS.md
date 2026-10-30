@@ -24,8 +24,13 @@ card** declared in the manifest, which the user can edit and approve.
 - `server.ts` — standard MCP stdio server (@modelcontextprotocol/sdk + zod);
   only wires `src/` to the tools. Must stay at the root (run.sh launches it).
 - `src/` — our code (run `bun test`):
-  - `composio.ts` — Composio HTTP client (`ExecuteTool`).
+  - `composio.ts` — Composio HTTP client (`execute` for tools, `request`
+    for REST) and `isConnectionError` for missing/expired/revoked links.
   - `asana.ts` — Asana operations on an injected `ExecuteTool`.
+  - `connection.ts` — the Asana link's status in Composio, used to explain
+    "not connected / expired / revoked" errors.
+  - `env.ts` — loads `.env` (VoiceOS's bundled Bun 1.3 has no
+    `process.loadEnvFile`).
   - `due.ts` — turns due date/time args into Asana's `due_on` / `due_at`.
   - `cards.ts` — `create_task`'s result and error glance cards.
   - `*.test.ts` — unit tests; Asana logic is tested with a fake executor.
@@ -34,9 +39,22 @@ card** declared in the manifest, which the user can edit and approve.
 - `confirm-card/` — source of `create_task`'s confirmation card
   (`build.ts` markup, `card.css`, `card.js`); edit them, then
   `bun confirm-card/build.ts` rewrites the card HTML in the manifest.
+- `.env` (from `.env.example`) — the developer's Composio credentials; see
+  "Composio setup" below. Never share or commit it.
 - `package.json` — add dependencies here, then `bun install`.
 - `icon.png` / `studio-meta.json` — the Studio's icon and preview fixtures;
   safe to leave untouched.
+
+## Composio setup
+
+Composio credentials belong to whoever runs this integration, not to the end
+user, so they are **not** VoiceOS setup fields:
+
+1. Copy `.env.example` to `.env` and set `COMPOSIO_API_KEY` (and
+   `COMPOSIO_USER_ID` if not `default`). `server.ts` loads it on start.
+2. In platform.composio.dev → Connected accounts, connect **Asana** (OAuth2,
+   Composio-managed) for that user_id. Re-connect there if it expires or is
+   revoked; `create_task` errors say which one happened.
 
 ## Rules that make integrations feel native
 

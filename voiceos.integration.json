@@ -3,8 +3,8 @@
   "id": "com.voiceos.generated.asana-composio",
   "version": "1.0.0",
   "name": "Asana Tasks",
-  "summary": "Create tasks in Asana My Tasks via Composio, with due date/time, project and section.",
-  "description": "Add tasks to your Asana 'My Tasks' using Composio OAuth2. Pick a due date and time, a project, and a My Tasks section on the confirmation card. Your primary workspace is detected automatically.",
+  "summary": "Create tasks in Asana My Tasks via Composio with one voice request.",
+  "description": "Add tasks to your Asana 'My Tasks' through Composio (OAuth2). Pick a due date and time, a project and a My Tasks section on the confirmation card. Your primary workspace is detected automatically.",
   "supportedPlatforms": [
     "darwin",
     "win32"
@@ -29,21 +29,6 @@
     }
   ],
   "preferences": [
-    {
-      "name": "COMPOSIO_API_KEY",
-      "title": "Composio API key",
-      "description": "Settings -> API Keys in your Composio dashboard (platform.composio.dev/settings).",
-      "type": "password",
-      "required": true
-    },
-    {
-      "name": "COMPOSIO_ENTITY_ID",
-      "title": "Composio user ID",
-      "description": "The Composio user_id your Asana account is connected under (Connected Accounts in the Composio dashboard). Leave blank for 'default'.",
-      "type": "text",
-      "required": false,
-      "default": "default"
-    },
     {
       "name": "ASANA_WORKSPACE_GID",
       "title": "Asana workspace GID",
