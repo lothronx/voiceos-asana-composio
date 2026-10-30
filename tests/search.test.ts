@@ -79,7 +79,7 @@ test("other search failures are not hidden behind the fallback", async () => {
 test("getTask merges fields, subtasks and the latest three real comments", async () => {
   const execute: ExecuteTool = async (slug) => ({
     ASANA_GET_A_TASK: { data: {
-      gid: "42", name: "Call Eric", notes: "agenda", completed: false, due_at: "2026-10-31T22:30:00.000Z",
+      gid: "42", name: "Call Eric", notes: "agenda " + "x".repeat(3000), completed: false, due_at: "2026-10-31T22:30:00.000Z",
       assignee: { name: "Yue" }, assignee_section: { name: "Today" }, projects: [{ name: "Launch" }], tags: [{ name: "urgent" }],
       parent: null, created_at: "c", modified_at: "m", permalink_url: "https://app.asana.com/x",
     } },
@@ -93,8 +93,9 @@ test("getTask merges fields, subtasks and the latest three real comments", async
     ] },
   } as Record<string, any>)[slug];
   const task = await createAsana(execute).getTask("42");
+  expect(task.notes).toHaveLength(3007); // descriptions are never cut: update_task may write them back
   expect(task).toMatchObject({
-    name: "Call Eric", notes: "agenda", due: "2026-10-31 17:30", assignee: "Yue", section: "Today",
+    name: "Call Eric", due: "2026-10-31 17:30", assignee: "Yue", section: "Today",
     projects: ["Launch"], tags: ["urgent"], parent: "",
     subtasks: [{ name: "Book room", completed: true }, { name: "Send invite", completed: false }],
   });

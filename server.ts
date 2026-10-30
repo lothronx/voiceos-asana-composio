@@ -385,12 +385,12 @@ const TASK_FIELDS = [
 const toChoices = (list: any[] | undefined): Choice[] =>
   (list ?? []).map((x) => ({ gid: String(x.gid), name: String(x.name) }));
 
-/** Memoizes `load` for `ttlMs`; a failed load isn't cached. */
-function cached<T>(ttlMs: number, load: () => Promise<T>): () => Promise<T> {
+/** Memoizes `load` for `ttlMs`; `refresh` reloads now. A failed load isn't cached. */
+function cached<T>(ttlMs: number, load: () => Promise<T>): (refresh?: boolean) => Promise<T> {
   let value: Promise<T> | undefined;
   let at = 0;
-  return () => {
-    if (!value || Date.now() - at > ttlMs) {
+  return (refresh = false) => {
+    if (refresh || !value || Date.now() - at > ttlMs) {
       at = Date.now();
       value = load().catch((err) => {
         value = undefined;
@@ -401,8 +401,9 @@ function cached<T>(ttlMs: number, load: () => Promise<T>): () => Promise<T> {
   };
 }
 
-// Projects, My Tasks sections and people change rarely: one fetch serves the
-// options lookup, the card's checks and the write that follows it.
+// Projects, My Tasks sections and people change rarely. The explicit lookups
+// (list_asana_options, find_asana_tasks) fetch fresh; the card checks and the
+// write that follow reuse that fetch.
 const LISTS_TTL_MS = 5 * 60_000;
 
 export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string; proxy?: ProxyCall } = {}) {
@@ -430,7 +431,6 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     if (!list?.gid) throw new Error("Could not find your My Tasks list in Asana.");
     return (myTasksCache = { gid: String(list.gid), owner: String(list.owner?.gid ?? "") });
   }
-  const myTasksList = async () => (await myTasks()).gid;
 
   /**
    * Guards against a mislabeled confirmation card. Every label on the card
@@ -453,7 +453,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     // shortcut: first 100 projects only; paginate via next_page.offset if users hit the cap.
     const [projectsRes, sectionsRes] = await Promise.all([
       execute("ASANA_GET_MULTIPLE_PROJECTS", { workspace: workspace.gid, archived: false, limit: 100 }),
-      myTasksList().then((gid) => execute("ASANA_GET_SECTIONS_IN_PROJECT", { project_gid: gid })),
+      myTasks().then(({ gid }) => execute("ASANA_GET_SECTIONS_IN_PROJECT", { project_gid: gid })),
     ]);
     return { workspace, projects: toChoices(projectsRes?.data), sections: toChoices(sectionsRes?.data) };
   });
@@ -509,11 +509,11 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   async function findTasks(query: string) {
     // shortcut: first 100 incomplete tasks only; paginate via next_page.offset if users hit the cap.
     const [options, tasksRes, users] = await Promise.all([
-      listOptions(),
-      myTasksList().then((gid) =>
+      listOptions(true),
+      myTasks().then(({ gid }) =>
         execute("ASANA_GET_TASKS_FOR_USER_TASK_LIST", { user_task_list_gid: gid, completed_since: "now", limit: 100, opt_fields: TASK_FIELDS }),
       ),
-      listUsers(),
+      listUsers(true),
     ]);
 
     const q = query.trim().toLowerCase();
@@ -755,8 +755,9 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     return {
       gid: String(t.gid),
       name: String(t.name ?? ""),
-      // Notes and comments are other people's text: capped, and flagged as data where the model reads them.
-      notes: clip(String(t.notes ?? ""), 2000),
+      // Notes and comments are other people's text, flagged as data where the model reads them.
+      // Notes stay whole: the model may write them back via update_task. Comments are capped.
+      notes: String(t.notes ?? ""),
       completed: !!t.completed,
       due: [due.due_on, due.due_time].filter(Boolean).join(" "),
       due_label: friendlyDue([due.due_on, due.due_time].filter(Boolean).join(" ")),
@@ -1313,7 +1314,7 @@ async function main(): Promise<void> {
     // No glance card: this is a silent lookup step before create_task's confirmation card.
     async () => {
       try {
-        return textResult(await asana.listOptions());
+        return textResult(await asana.listOptions(true));
       } catch (err) {
         console.error("list_asana_options failed:", err);
         return textResult(await describeError(err, linkStatus, userId), true);

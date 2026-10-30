@@ -109,3 +109,14 @@ test("a project the card labeled wrongly is refused before the task is created",
   await result.catch(() => {});
   expect(calls.map((c) => c.slug)).not.toContain("ASANA_CREATE_A_TASK");
 });
+
+test("an explicit lookup fetches fresh lists, so a project made seconds ago can be picked", async () => {
+  let projects = [{ gid: "77", name: "Launch" }];
+  const { execute } = fakeComposio({ ...LISTS, ASANA_GET_MULTIPLE_PROJECTS: () => ({ data: projects }), ASANA_CREATE_A_TASK: created() });
+  const asana = createAsana(execute);
+  await asana.listOptions(true);
+  projects = [...projects, { gid: "88", name: "New project" }];
+  expect((await asana.listOptions(true)).projects.map((p) => p.gid)).toEqual(["77", "88"]);
+  // The create's check reuses that fresh fetch instead of refusing the new project.
+  await asana.createTask({ name: "a", project: "88", project_choices: [{ gid: "88", name: "New project" }] });
+});
