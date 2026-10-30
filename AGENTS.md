@@ -24,6 +24,8 @@ card** declared in the manifest, which the user can edit and approve.
 - `server.ts` — standard MCP stdio server (@modelcontextprotocol/sdk + zod).
 - `run.sh` / `run.cmd` — the launchers VoiceOS invokes (macOS / Windows);
   leave them alone.
+- `build-confirm.ts` — source of `create_task`'s confirmation card; edit it,
+  then `bun build-confirm.ts` rewrites the card HTML in the manifest.
 - `package.json` — add dependencies here, then `bun install`.
 - `icon.png` / `studio-meta.json` — the Studio's icon and preview fixtures;
   safe to leave untouched.

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { renderCustom, markHtml, esc, clip } from "./widgetKit.ts";
+import { dueFields } from "./due.ts";
 
 const server = new McpServer({ name: "asana-tasks", version: "1.0.0" });
 const ACCENT = "#f06a6a"; // Asana coral brand accent
@@ -83,21 +84,6 @@ html[data-k-theme=light] .as-card-err{
   overflow:hidden;
   word-break:break-word;
 }
-.as-notes{
-  margin-top:5px;
-  padding-left:25px;
-  font-size:12.5px;
-  line-height:1.45;
-  color:rgba(255,255,255,0.68);
-  display:-webkit-box;
-  -webkit-line-clamp:2;
-  -webkit-box-orient:vertical;
-  overflow:hidden;
-  word-break:break-word;
-}
-html[data-k-theme=light] .as-notes{
-  color:rgba(0,0,0,0.68);
-}
 .as-err-msg{
   margin-top:6px;
   padding-left:25px;
@@ -129,24 +115,6 @@ html[data-k-theme=light] .as-pill{
   background:rgba(0,0,0,0.04);
   border-color:rgba(0,0,0,0.06);
 }
-.as-avatar{
-  width:14px;
-  height:14px;
-  border-radius:50%;
-  background:var(--accent);
-  color:#fff;
-  font-size:8.5px;
-  font-weight:700;
-  display:grid;
-  place-items:center;
-  line-height:1;
-}
-.as-dot{
-  width:6px;
-  height:6px;
-  border-radius:50%;
-  background:var(--accent);
-}
 .as-pill.as-due{
   color:var(--ink-3);
   font-variant-numeric:tabular-nums;
@@ -176,49 +144,59 @@ html[data-k-theme=light] .as-pill{
 @keyframes asIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 `;
 
-async function getWorkspaceInfo(apiKey: string, entityId: string): Promise<{ gid?: string; name: string }> {
+const COMPOSIO_URL = "https://backend.composio.dev/api/v3.1/tools/execute";
+
+// Runs a Composio tool; throws with Composio's own message on any failure.
+async function composio(slug: string, args: Record<string, unknown>): Promise<any> {
+  const apiKey = process.env.COMPOSIO_API_KEY?.trim();
+  if (!apiKey) throw new Error("Missing Composio API key — add it in settings.");
+  const userId = process.env.COMPOSIO_ENTITY_ID?.trim() || "default";
+
+  const res = await fetch(`${COMPOSIO_URL}/${slug}`, {
+    method: "POST",
+    headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, arguments: args }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const json: any = await res.json().catch(() => null);
+  if (!res.ok) {
+    const e = json?.error;
+    throw new Error(`Composio HTTP ${res.status}: ${e?.message || e || res.statusText}`);
+  }
+  if (!json?.successful) throw new Error(json?.error || `${slug} failed`);
+  return json.data;
+}
+
+type Choice = { gid: string; name: string };
+const toChoices = (list: any[] | undefined): Choice[] =>
+  (list ?? []).map((x) => ({ gid: String(x.gid), name: String(x.name) }));
+
+// Asana requires a numeric workspace GID: the settings override, else the user's first workspace.
+// Cached for the life of the server process, which VoiceOS restarts on reconnect.
+let workspaceCache: Choice | undefined;
+async function resolveWorkspace(): Promise<Choice> {
   const envGid = process.env.ASANA_WORKSPACE_GID?.trim();
-  if (envGid) {
-    return { gid: envGid, name: `Workspace ${envGid.slice(-4)}` };
-  }
+  if (envGid) return { gid: envGid, name: `Workspace ${envGid.slice(-4)}` };
+  if (workspaceCache) return workspaceCache;
 
-  const actions = ["ASANA_GET_MULTIPLE_WORKSPACES", "ASANA_GET_ALL_WORKSPACES", "ASANA_GET_A_USER"];
-  for (const act of actions) {
-    try {
-      const input = act === "ASANA_GET_A_USER" ? { user_gid: "me" } : {};
-      const res = await fetch(`https://backend.composio.dev/api/v1/actions/${act}/execute`, {
-        method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ entity_id: entityId, input }),
-        signal: AbortSignal.timeout(8000),
-      });
+  const list = toChoices((await composio("ASANA_GET_MULTIPLE_WORKSPACES", {}))?.data);
+  if (list.length === 0) throw new Error("No Asana workspaces found for this Composio connection.");
+  return (workspaceCache = list[0]);
+}
 
-      if (!res.ok) continue;
-      const json: any = await res.json();
-      const raw = json?.data?.data || json?.data || json?.response_data?.data || json?.response_data;
-
-      if (Array.isArray(raw) && raw.length > 0) {
-        const first = raw[0];
-        const gid = first.gid || first.id;
-        const name = first.name || "Default Workspace";
-        if (gid) return { gid: String(gid), name: String(name) };
-      }
-
-      if (raw?.workspaces && Array.isArray(raw.workspaces) && raw.workspaces.length > 0) {
-        const first = raw.workspaces[0];
-        const gid = first.gid || first.id;
-        const name = first.name || "Default Workspace";
-        if (gid) return { gid: String(gid), name: String(name) };
-      }
-    } catch {
-      // Continue to next probe
-    }
-  }
-
-  return { name: "My Tasks" };
+function errorResult(taskName: string, errMsg: string) {
+  const errCard = renderErrorCard(taskName, errMsg);
+  return {
+    isError: true,
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        error: errMsg,
+        taskName,
+        _voiceos_glance: { blocks: [{ type: "widget", html: errCard.html, height: errCard.height }] },
+      }),
+    }],
+  };
 }
 
 function renderErrorCard(taskName: string, errorMessage: string) {
@@ -242,8 +220,8 @@ function renderErrorCard(taskName: string, errorMessage: string) {
         <div class="as-err-msg">${esc(clip(errorMessage, 180))}</div>
       </div>
       <div class="as-meta">
-        <div class="as-pill"><span class="as-avatar">Me</span><span>My Tasks</span></div>
-        <div class="as-pill"><span class="as-dot"></span><span>Verify Composio connection</span></div>
+        <div class="as-pill">My Tasks</div>
+        <div class="as-pill">Verify Composio connection</div>
       </div>
     </div>
   `;
@@ -256,125 +234,100 @@ function renderErrorCard(taskName: string, errorMessage: string) {
 }
 
 server.registerTool(
+  "list_asana_options",
+  {
+    title: "List Asana projects and sections",
+    description: "List the user's Asana projects and their My Tasks sections (e.g. Recently assigned / Today / Next week / Later — users can rename or add their own). Always call this right before create_task and pass the results as project_choices and section_choices. Also use when the user asks which Asana projects or My Tasks sections they have.",
+    inputSchema: {} as any,
+  },
+  async () => {
+    const workspace = await resolveWorkspace();
+    // shortcut: first 100 projects only; paginate via next_page.offset if users hit the cap.
+    const [projectsRes, taskList] = await Promise.all([
+      composio("ASANA_GET_MULTIPLE_PROJECTS", { workspace: workspace.gid, archived: false, limit: 100 }),
+      composio("ASANA_GET_A_USER_TASK_LIST", { user_task_list_gid: "me", workspace: workspace.gid }),
+    ]);
+    const myTasksGid = taskList?.data?.gid;
+    if (!myTasksGid) throw new Error("Could not find your My Tasks list in Asana.");
+    const projects = toChoices(projectsRes?.data);
+    const sections = toChoices((await composio("ASANA_GET_SECTIONS_IN_PROJECT", { project_gid: myTasksGid }))?.data);
+
+    // No glance card: this is a silent lookup step before create_task's confirmation card.
+    return { content: [{ type: "text" as const, text: JSON.stringify({ workspace, projects, sections }) }] };
+  },
+);
+
+const choiceSchema = z.array(z.object({ gid: z.string(), name: z.string() }));
+
+server.registerTool(
   "create_task",
   {
     title: "Create task",
-    description: "Create a new task in My Tasks in Asana via Composio. Use when the user asks to create, add, or schedule a task or todo in Asana.",
+    description: "Create a new task assigned to the user in Asana My Tasks via Composio. Use when the user asks to create, add, or schedule a task or todo in Asana. First call list_asana_options and pass its projects and sections as project_choices and section_choices so the user can pick them on the confirmation card. Set project / section only when the user named one, using its gid.",
     inputSchema: {
       name: z.string().describe("Task name or title"),
-      notes: z.string().optional().describe("Optional task description or notes"),
-      workspace: z.string().optional().describe("Optional Asana workspace GID or name"),
-      due_on: z.string().optional().describe("Optional due date in YYYY-MM-DD format"),
+      due_on: z.string().optional().describe("Optional due date, YYYY-MM-DD"),
+      due_time: z.string().optional().describe("Optional due time in the user's local time, 24h HH:MM; requires due_on"),
+      project: z.string().optional().describe("Optional project gid from list_asana_options"),
+      section: z.string().optional().describe("Optional My Tasks section gid from list_asana_options"),
+      project_choices: choiceSchema.optional().describe("The projects array returned by list_asana_options, passed through unchanged"),
+      section_choices: choiceSchema.optional().describe("The sections array returned by list_asana_options, passed through unchanged"),
     } as any,
   },
-  async (args: { name: string; notes?: string; workspace?: string; due_on?: string }) => {
-    const apiKey = process.env.COMPOSIO_API_KEY?.trim();
-    if (!apiKey) {
-      const errMsg = "Missing Composio API key — add it in settings.";
-      const errCard = renderErrorCard(args.name, errMsg);
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            error: errMsg,
-            taskName: args.name,
-            _voiceos_glance: { blocks: [{ type: "widget", html: errCard.html, height: errCard.height }] },
-          }),
-        }],
-      };
-    }
-
-    const entityId = process.env.COMPOSIO_ENTITY_ID?.trim() || "default";
-
+  async (args: {
+    name: string;
+    due_on?: string;
+    due_time?: string;
+    project?: string;
+    section?: string;
+    project_choices?: Choice[];
+    section_choices?: Choice[];
+  }) => {
     try {
-      const workspaceInfo = args.workspace
-        ? { gid: args.workspace, name: `Workspace ${args.workspace.slice(-4)}` }
-        : await getWorkspaceInfo(apiKey, entityId);
+      const workspaceInfo = await resolveWorkspace();
+      // The confirmation card sends "" for fields the user cleared.
+      const project = args.project?.trim();
+      const section = args.section?.trim();
 
       const taskInput: Record<string, any> = {
         name: args.name,
         assignee: "me",
+        workspace: workspaceInfo.gid,
+        ...dueFields(args.due_on?.trim(), args.due_time?.trim()),
       };
-      if (args.notes) taskInput.notes = args.notes;
-      if (workspaceInfo.gid) taskInput.workspace = workspaceInfo.gid;
-      if (args.due_on) taskInput.due_on = args.due_on;
+      if (project) taskInput.projects = [project];
 
-      let res = await fetch("https://backend.composio.dev/api/v1/actions/ASANA_CREATE_A_TASK/execute", {
-        method: "POST",
-        headers: {
-          "x-api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ entity_id: entityId, input: taskInput }),
-        signal: AbortSignal.timeout(8000),
-      });
+      const rawData = (await composio("ASANA_CREATE_A_TASK", { data: taskInput }))?.data ?? {};
+      if (!rawData.gid) throw new Error("Asana returned no task ID — the task may not have been created.");
 
-      if (res.status === 404) {
-        res = await fetch("https://backend.composio.dev/api/v1/actions/ASANA_CREATE_TASK/execute", {
-          method: "POST",
-          headers: {
-            "x-api-key": apiKey,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ entity_id: entityId, input: taskInput }),
-          signal: AbortSignal.timeout(8000),
-        });
-      }
-
-      if (!res.ok) {
-        let errDetail = `Composio HTTP ${res.status}`;
+      // The task already exists at this point, so a failed move is reported, not thrown.
+      let warning: string | undefined;
+      if (section) {
         try {
-          const errJson: any = await res.json();
-          errDetail = errJson?.error || errJson?.message || errDetail;
-        } catch {
-          // ignore parsing error
+          await composio("ASANA_ADD_TASK_TO_SECTION", { section_gid: section, task_gid: String(rawData.gid) });
+        } catch (err: any) {
+          warning = `Task created, but moving it to the section failed: ${err?.message}`;
         }
-        const errCard = renderErrorCard(args.name, errDetail);
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({
-              error: errDetail,
-              taskName: args.name,
-              _voiceos_glance: { blocks: [{ type: "widget", html: errCard.html, height: errCard.height }] },
-            }),
-          }],
-        };
       }
 
-      const json: any = await res.json();
-      if (json.successful === false || json.success === false) {
-        const errMsg = json.error || json.message || "Failed to create task in Asana.";
-        const errCard = renderErrorCard(args.name, errMsg);
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({
-              error: errMsg,
-              taskName: args.name,
-              _voiceos_glance: { blocks: [{ type: "widget", html: errCard.html, height: errCard.height }] },
-            }),
-          }],
-        };
-      }
-
-      const rawData = json?.data?.data || json?.data || json?.response_data?.data || json?.response_data || {};
+      const sectionName = warning
+        ? rawData.assignee_section?.name
+        : args.section_choices?.find((s) => s.gid === section)?.name ?? rawData.assignee_section?.name;
       const task = {
-        gid: String(rawData.gid || rawData.id || ""),
+        gid: String(rawData.gid),
         name: String(rawData.name || args.name),
-        notes: String(rawData.notes || args.notes || ""),
-        workspace: String(rawData.workspace?.name || workspaceInfo.name || "My Tasks"),
-        due_on: String(rawData.due_on || args.due_on || ""),
-        permalink_url: rawData.permalink_url || (rawData.gid ? `https://app.asana.com/0/0/${rawData.gid}` : undefined),
+        section: String(sectionName || "My Tasks"),
+        project: rawData.projects?.[0]?.name ? String(rawData.projects[0].name) : "",
+        due: rawData.due_at ? `${args.due_on} ${args.due_time}` : String(rawData.due_on || ""),
+        permalink_url: rawData.permalink_url || `https://app.asana.com/0/0/${rawData.gid}`,
       };
 
-      const hasNotes = Boolean(task.notes);
       const cardBody = `
         <div class="as">
           <div class="as-head">
             ${markHtml()}
             <span class="as-chip">MY TASKS</span>
-            <span class="as-tag as-success">Created in Asana</span>
+            <span class="as-tag ${warning ? "as-err" : "as-success"}">${warning ? "Created · section not set" : "Created in Asana"}</span>
           </div>
           <div class="as-card">
             <div class="as-trow">
@@ -386,13 +339,12 @@ server.registerTool(
               </div>
               <div class="as-title">${esc(clip(task.name, 90))}</div>
             </div>
-            ${hasNotes ? `<div class="as-notes">${esc(clip(task.notes, 140))}</div>` : ""}
           </div>
           <div class="as-meta">
-            <div class="as-pill"><span class="as-avatar">Me</span><span>My Tasks</span></div>
-            <div class="as-pill"><span class="as-dot"></span><span>${esc(clip(task.workspace, 24))}</span></div>
-            ${task.due_on ? `<div class="as-pill as-due"><svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2.5" width="9" height="8" rx="1.5"/><path d="M1.5 5h9M3.5 1.5v2M8.5 1.5v2"/></svg><span>${esc(task.due_on)}</span></div>` : ""}
-            ${task.permalink_url ? `<a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span><svg width="10" height="10" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 8.5l6-6M4 2.5h4.5V7"/></svg></a>` : ""}
+            <div class="as-pill">${esc(clip(task.section, 18))}</div>
+            ${task.project ? `<div class="as-pill">${esc(clip(task.project, 18))}</div>` : ""}
+            ${task.due ? `<div class="as-pill as-due"><svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2.5" width="9" height="8" rx="1.5"/><path d="M1.5 5h9M3.5 1.5v2M8.5 1.5v2"/></svg><span>${esc(task.due)}</span></div>` : ""}
+            <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span><svg width="10" height="10" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 8.5l6-6M4 2.5h4.5V7"/></svg></a>
           </div>
         </div>
       `;
@@ -401,29 +353,24 @@ server.registerTool(
         accent: ACCENT,
         css: CSS,
         body: cardBody,
-        height: hasNotes ? 175 : 155,
+        height: 135,
       });
 
       const payload = {
         success: true,
         task,
+        ...(warning ? { warning } : {}),
         _voiceos_glance: { blocks: [{ type: "widget", html: card.html, height: card.height }] },
       };
 
       return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
     } catch (err: any) {
-      const errMsg = err?.message || "Network error while connecting to Composio.";
-      const errCard = renderErrorCard(args.name, errMsg);
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            error: errMsg,
-            taskName: args.name,
-            _voiceos_glance: { blocks: [{ type: "widget", html: errCard.html, height: errCard.height }] },
-          }),
-        }],
-      };
+      console.error("create_task failed:", err);
+      // A timed-out create may still have reached Asana; retrying blindly would duplicate the task.
+      const msg = err?.name === "TimeoutError"
+        ? "Composio did not answer in time. The task may still have been created — check Asana before retrying."
+        : err?.message || "Network error while connecting to Composio.";
+      return errorResult(args.name, msg);
     }
   },
 );
