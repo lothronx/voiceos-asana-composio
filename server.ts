@@ -17,6 +17,9 @@
  *       COMPOSIO_API_KEY=<project key: platform.composio.dev → Settings → API Keys>
  *       COMPOSIO_USER_ID=default   # the user_id Asana is connected under
  *     .env never ships with Publish; each developer keeps their own.
+ *   - TEMPORARY, for testing: the integration's Setup page also has an optional
+ *     "Composio API key" field. When filled it wins over .env. Remove it from
+ *     voiceos.integration.json `preferences` before release.
  *   - In platform.composio.dev → Connected accounts, connect Asana (OAuth2,
  *     Composio-managed) for that user_id. Reconnect there if it expires or is
  *     revoked; create_task errors say which one happened.
@@ -38,7 +41,8 @@ import { renderCustom, markHtml, esc, clip, type RenderedWidget } from "./widget
 // Hand-rolled on purpose: VoiceOS launches the server with its bundled Bun
 // (1.3.x, no process.loadEnvFile) or with tsx/Node, and neither path can be
 // relied on to read .env by itself. Supports KEY=value, KEY="value", blank lines
-// and # comments. Variables already set in the environment win.
+// and # comments. Non-empty variables already in the environment win (VoiceOS
+// injects Setup fields as env vars, and a blank field arrives as "").
 // ============================================================================
 
 export function parseEnv(text: string): Record<string, string> {
@@ -61,7 +65,7 @@ export function loadEnvFile(path: string): void {
     throw err;
   }
   for (const [key, value] of Object.entries(parseEnv(text))) {
-    if (process.env[key] === undefined) process.env[key] = value;
+    if (!process.env[key]?.trim()) process.env[key] = value;
   }
 }
 
@@ -105,7 +109,7 @@ export type ExecuteTool = (slug: string, args: Record<string, unknown>) => Promi
 export type ComposioRequest = (method: "GET" | "POST", path: string, body?: unknown) => Promise<any>;
 
 export interface ComposioConfig {
-  /** Project API key (COMPOSIO_API_KEY in .env). Checked per call, so a missing key becomes a tool error, not a crash at startup. */
+  /** Project API key (COMPOSIO_API_KEY: Setup field, else .env). Checked per call, so a missing key becomes a tool error, not a crash at startup. */
   apiKey?: string;
   /** The Composio user_id the Asana account is connected under. */
   userId: string;
@@ -115,7 +119,7 @@ export interface ComposioConfig {
 
 export function createComposio(config: ComposioConfig): { execute: ExecuteTool; request: ComposioRequest } {
   const request: ComposioRequest = async (method, path, body) => {
-    if (!config.apiKey) throw new ComposioError("Missing Composio API key — set COMPOSIO_API_KEY in this integration's .env.", "composio");
+    if (!config.apiKey) throw new ComposioError("Missing Composio API key — set COMPOSIO_API_KEY in this integration's .env (or, for testing, its Setup page).", "composio");
 
     const res = await (config.fetch ?? fetch)(`${BASE_URL}${path}`, {
       method,
@@ -565,7 +569,7 @@ export async function describeError(
     return { error: `${why} Connect Asana for Composio user "${userId}" in ${DASHBOARD}.`, reconnect: true };
   }
   if (err instanceof ComposioError && err.source === "composio" && err.status === 401) {
-    return { error: "The Composio API key was rejected — check COMPOSIO_API_KEY in this integration's .env.", reconnect: false };
+    return { error: "The Composio API key was rejected — check the key in this integration's Setup page or .env.", reconnect: false };
   }
   return { error: err?.message || "Network error while connecting to Composio.", reconnect: false };
 }

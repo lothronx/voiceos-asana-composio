@@ -30,6 +30,13 @@
   ],
   "preferences": [
     {
+      "name": "COMPOSIO_API_KEY",
+      "title": "Composio API key (temporary, for testing)",
+      "description": "Temporary field for testing; it will be removed before release. Leave blank to use COMPOSIO_API_KEY from the integration's .env.",
+      "type": "password",
+      "required": false
+    },
+    {
       "name": "ASANA_WORKSPACE_GID",
       "title": "Asana workspace GID",
       "description": "Optional workspace GID override. Leave blank to auto-detect your primary workspace.",
