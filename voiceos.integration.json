@@ -10,8 +10,8 @@
     "win32"
   ],
   "publisher": {
-    "id": "pub_user",
-    "name": "Made in VoiceOS"
+    "id": "lothronx",
+    "name": "Yue Wu"
   },
   "runtime": {
     "kind": "local-mcp",

@@ -25,6 +25,9 @@ All runtime code is in `server.ts`. `AGENTS.md` has the file layout and the dev 
 2. Copy `.env.example` to `.env` and set your own `COMPOSIO_API_KEY` and `COMPOSIO_USER_ID`.
 3. In platform.composio.dev, open Connected accounts and connect Asana for that user_id.
 4. Run `bun test`.
+5. Check `publisher` in `voiceos.integration.json`. It credits the original author as `{"id": "lothronx", "name": "Yue Wu"}`, in
+   the same form as the bundled grokbot integration. Studio generated `pub_user` / "Made in VoiceOS" there, so make sure
+   Publish accepts the new value, or change it to whatever your team uses.
 
 ## What we built
 
