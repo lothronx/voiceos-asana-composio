@@ -13,7 +13,7 @@
 }
 html[data-k-theme=light] .as { --pop: #fff; }
 
-/* ---- Header: same as the result card (src/cards.ts) so the two read as one flow ---- */
+/* ---- Header: same as the result cards (section 5 of server.ts) so the two read as one flow ---- */
 .as-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
 .as-chip { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-4); }
 
@@ -95,7 +95,7 @@ html[data-k-theme=light] .as-pop { box-shadow: 0 0 0 1px var(--line), 0 12px 28p
 }
 .as-c:hover { background: var(--fill-2); }
 .as-c[aria-pressed=true] { background: var(--accent); color: #fff; }
-/* Clear sits at the top: the bottom-right corner belongs to the host's Create task button. */
+/* Clear sits at the top: the bottom-right corner belongs to the host's confirm button. */
 .as-clear {
   flex: none; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent;
   color: var(--ink-2); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;

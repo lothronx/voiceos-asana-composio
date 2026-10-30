@@ -202,7 +202,7 @@ export function isConnectionError(err: unknown): boolean {
 
 // ============================================================================
 // 3. Due date → Asana
-// Turns create_task's due_on / due_time into Asana's due_on or due_at.
+// Turns the cards' due_on / due_time into Asana's due_on or due_at, and back for display.
 // ============================================================================
 
 // Turns the tool's due_on / due_time args into Asana's due_on or due_at.
@@ -1015,6 +1015,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
    * their assignee's My Tasks (checked against real Asana). Counted from the first 100.
    */
   async function tasksDeletedWith(project_gid: string): Promise<string> {
+    // shortcut: counts the first 100 tasks ("100+" beyond) and no subtasks; page via next_page if exact counts matter.
     const res = await execute("ASANA_GET_TASKS_FROM_A_PROJECT", { project_gid, limit: 100, opt_fields: ["projects", "assignee"] });
     const n = (res?.data ?? []).filter((t: any) => (t.projects ?? []).length <= 1 && !t.assignee).length;
     if (res?.next_page) return `${n}+ tasks`;
@@ -1699,6 +1700,21 @@ export async function describeError(
 
 // ============================================================================
 // 7. Tools (MCP wiring, entry point)
+//
+// The 9 approved Asana actions, and the tools that implement them:
+//   Create task      create_task      (+ list_asana_options, kind "task")
+//   Update task      update_task      (+ find_asana_tasks)
+//   Get task         get_task
+//   Search tasks     search_tasks
+//   Add comment      add_comment
+//   Complete task    complete_task    (+ set_task_done: the circle on task cards)
+//   Create project   create_project   (+ list_asana_options, kind "project")
+//   Delete project   delete_project   (+ find_asana_projects)
+//   Create goal      create_goal      (+ list_asana_options, kind "goal")
+// The four in parentheses are agent-only helpers (visibility "agent"), not
+// extra features: a confirmation card can only show what the tool's arguments
+// carry, so the agent looks the choices up first. set_task_done exists
+// because a card-initiated approval would show VoiceOS's raw JSON dialog.
 // Only runs when this file is the program (VoiceOS / run.sh), not when tests
 // import it. import.meta.main is missing under tsx, so compare paths instead.
 // ============================================================================

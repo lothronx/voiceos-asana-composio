@@ -1,13 +1,14 @@
 /*
- * Behaviour of create_task's confirmation card (inlined by build.ts).
+ * Behaviour of the editable confirmation cards — create_task, update_task,
+ * create_project, create_goal (inlined by build.ts; the simple cards use SIMPLE_SCRIPT there).
  * Runs in VoiceOS's sandboxed iframe: plain ES5-style browser JS, no imports, no network.
  *
  * Contract with the host (via widgetKit's bridge script, which runs after this one):
  *  - On `voiceos:init` the host sends the pending tool args. Our handler runs
  *    first and renders from them; the kit then copies args into every element
- *    with a data-voiceos-key (here: the title input and four hidden inputs).
+ *    with a data-voiceos-key (the title input, the notes and one hidden input per field).
  *  - An 'input' event on a keyed element stages that value; staged values
- *    replace the agent's args when the user presses the host's Create task.
+ *    replace the agent's args when the user presses the host's confirm button.
  */
 (function () {
   var $ = function (id) { return document.getElementById(id); };
@@ -18,7 +19,7 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  // ---- Dates (all local time, matching due.ts on the server) ----
+  // ---- Dates (all local time, matching dueFields() in server.ts) ----
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   var pad = function (n) { return (n < 10 ? '0' : '') + n; };
