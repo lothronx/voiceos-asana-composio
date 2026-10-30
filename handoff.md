@@ -26,19 +26,39 @@ All runtime code is in `server.ts`. `AGENTS.md` has the file layout and the dev 
 3. In platform.composio.dev, open Connected accounts and connect Asana for that user_id.
 4. Run `bun test`.
 
-## Approved tools
+## What we built
 
-| Approved | Tool | Confirmation card | Helper the agent calls first |
+The user talks to VoiceOS. The agent picks one of the 9 approved tools below.
+
+- Every tool that changes data first shows an editable confirmation card. The change runs only after the user
+  approves it.
+- After every call, the notch shows a result card, on success and on failure. The model also gets the data as JSON.
+
+| Approved | Tool | What the user can do | Helper the agent calls first |
 |---|---|---|---|
-| Create task | `create_task` | yes | `list_asana_options` (`kind: "task"`) |
-| Update task | `update_task` | yes | `find_asana_tasks` |
-| Get task | `get_task` | no (read-only) | none |
-| Search tasks | `search_tasks` | no (read-only) | none |
-| Add story/comment | `add_comment` | yes | none |
-| Complete task | `complete_task` | yes | none (`set_task_done` is the circle on task cards) |
-| Create project | `create_project` | yes | `list_asana_options` (`kind: "project"`) |
-| Delete project | `delete_project` | yes | `find_asana_projects` |
-| Create goal | `create_goal` | yes | `list_asana_options` (`kind: "goal"`) |
+| Create task | `create_task` | Create a task in My Tasks: name, description, due date + time, project, My Tasks section. | `list_asana_options` (`kind: "task"`) |
+| Update task | `update_task` | Change any of the user's own tasks: name, description, due date/time, assignee (or unassign), project, section. Only fields that differ are written. | `find_asana_tasks` |
+| Get task | `get_task` | See one task (by id or name): description, due date, assignee, projects, section, tags, subtask progress, latest comments. If the name matches several tasks, the card lists them to pick from. | none |
+| Search tasks | `search_tasks` | Search the workspace by text, assignee, project, due date range, open/completed. Up to 20 results, open tasks first. Rows expand in place. | none |
+| Add story/comment | `add_comment` | Post a comment on a task. | none |
+| Complete task | `complete_task` | Complete or reopen a task by voice. The circle on task cards does the same in one click. | none (`set_task_done` handles the circle) |
+| Create project | `create_project` | Create a project: name, description, due date, team, default view (list/board/calendar). | `list_asana_options` (`kind: "project"`) |
+| Delete project | `delete_project` | Delete a project. The card says how many tasks go with it, and the server re-checks the name and that count before deleting. | `find_asana_projects` |
+| Create goal | `create_goal` | Create a goal: name, description, due date, owner (defaults to the user), time period. | `list_asana_options` (`kind: "goal"`) |
+
+## Current status
+
+- **All 9 tools work end to end against a real Asana workspace**, run through MCP with VoiceOS's bundled Bun. Each
+  one was tested that way. 78 unit tests pass (`bun test`).
+- **Measured times** (one user, US network, includes Composio):
+  - Creating a task: about 4 s from the lookup to the result.
+  - Rescheduling a task: about 1.7 s.
+  - Clicking the circle: about 1 s, and the card shows the change right away.
+  - Deleting a project: about 2.7 s.
+- **Not tested:**
+  - a real expired or revoked token (the error messages are covered by unit tests only);
+  - whether Asana also deletes the subtasks of the tasks it removes with a project (the delete card doesn't count
+    subtasks).
 
 ## Differences from the spec
 
