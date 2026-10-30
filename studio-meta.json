@@ -1,0 +1,50 @@
+{
+  "originalPrompt": "Integrate Asana MCP via Composio (OAuth2), i only need one tool call: Create task, which will enable me to create a task in My tasks.",
+  "preview": {
+    "utterances": [
+      "Create a task in Asana to prepare the quarterly review slides",
+      "Add a todo in My Tasks in Asana: review design specs",
+      "Create a task in Asana: Finalize deployment checklist"
+    ],
+    "toolPreviews": [
+      {
+        "tool": "create_task",
+        "sampleArgs": {
+          "name": "Prepare quarterly review slides",
+          "notes": "Include Q1 revenue metrics, product roadmap updates, and hiring plan.",
+          "due_on": "2025-04-30"
+        },
+        "stressCases": [
+          {
+            "state": "long-text",
+            "sampleArgs": {
+              "name": "Finalize Q2 comprehensive infrastructure migration roadmap and cross-functional capacity planning documentation across engineering teams",
+              "notes": "Verify high-availability multi-region failover tolerances, evaluate Redis cluster memory ceilings, reconcile staging telemetry discrepancies, and confirm SOC2 audit trail compliance before board review on Thursday morning."
+            },
+            "sampleData": {
+              "gid": "1208947291847120",
+              "name": "Finalize Q2 comprehensive infrastructure migration roadmap and cross-functional capacity planning documentation across engineering teams",
+              "notes": "Verify high-availability multi-region failover tolerances, evaluate Redis cluster memory ceilings, reconcile staging telemetry discrepancies, and confirm SOC2 audit trail compliance before board review on Thursday morning.",
+              "workspace": "Engineering Org",
+              "assignee": "me",
+              "permalink_url": "https://app.asana.com/0/1208947291847120/1208947291847120"
+            },
+            "expected": "Title clamps at 2 lines with ellipsis and notes clamp gracefully within the 8px-radius inner container without overflowing."
+          },
+          {
+            "state": "error",
+            "sampleArgs": {
+              "name": "Review budget spreadsheet"
+            },
+            "sampleData": {
+              "error": "Composio connection error: Asana OAuth connection not authorized. Re-authenticate in Composio Settings.",
+              "status": "unauthorized"
+            },
+            "expected": "Quiet coral tinted error surface displaying the connection issue while preserving the Asana header and My Tasks hierarchy."
+          }
+        ]
+      }
+    ]
+  },
+  "updatedAt": "2026-10-30T02:33:24.014Z"
+}
