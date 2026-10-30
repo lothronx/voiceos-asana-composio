@@ -1,0 +1,116 @@
+/*
+ * Styles for create_task's confirmation card (inlined by build.ts).
+ * Colour tokens (--ink-*, --fill-*, --line, --accent) come from widgetKit's base CSS
+ * and switch with the notch theme; only --pop (the opaque popover surface) is ours.
+ */
+
+.as {
+  position: relative; /* popovers are positioned against this */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  padding: 10px 14px 2px;
+  color: var(--ink-1);
+  --pop: #2b2b2f;
+}
+html[data-k-theme=light] .as { --pop: #fff; }
+
+/* ---- Header: same as the result card (src/cards.ts) so the two read as one flow ---- */
+.as-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.as-chip { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-4); }
+
+/* ---- Task name: an editable title with an Asana-coral underline ---- */
+.as-title {
+  display: block; width: 100%;
+  padding: 2px 0 7px; margin-bottom: 8px;
+  background: transparent; border: 0; border-bottom: 2px solid var(--accent); outline: none;
+  font: inherit; font-size: 17px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3;
+  color: var(--ink-1);
+}
+.as-title::placeholder { color: var(--ink-4); }
+
+/* ---- Field rows: label on the left, a borderless value button on the right ---- */
+.as-row { display: flex; align-items: center; min-height: 32px; }
+.as-lbl { flex: none; width: 58px; font-size: 12px; color: var(--ink-3); }
+.as-val {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+  height: 28px; margin-left: -8px; padding: 0 8px; /* -8px keeps the text aligned with the row's left edge */
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--ink-1); font: inherit; font-size: 13px; font-weight: 500; text-align: left;
+  cursor: pointer;
+}
+.as-val > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-val:hover, .as-val[aria-expanded=true] { background: var(--fill-1); }
+.as-val.as-empty { color: var(--ink-3); }
+.as-val svg { flex: none; color: var(--ink-4); transition: transform .15s ease; }
+.as-val[aria-expanded=true] svg { transform: rotate(180deg); }
+.as-val .as-ic { flex: none; color: var(--ink-3); }
+
+/* Date and time share the Due row (70/30); the time button only appears once there is a date. */
+.as-val + .as-val { margin-left: 4px; }
+#as-due-btn { flex: 7; }
+.as-time { flex: 3; font-variant-numeric: tabular-nums; }
+.as-val[hidden] { display: none; }
+
+/* ---- Popovers float over the rows below instead of pushing them down ---- */
+.as-pop {
+  position: absolute; z-index: 999; left: 64px; right: 14px; /* top is set by place() in the card script */
+  padding: 6px; border-radius: 12px; background: var(--pop);
+  box-shadow: 0 0 0 1px var(--line), 0 12px 32px rgba(0,0,0,.45);
+}
+html[data-k-theme=light] .as-pop { box-shadow: 0 0 0 1px var(--line), 0 12px 28px rgba(0,0,0,.16); }
+.as-pop[hidden] { display: none; }
+
+/* Option lists (time, project, section) */
+.as-list { max-height: 180px; overflow-y: auto; }
+.as-opt {
+  display: flex; align-items: center; width: 100%; height: 28px; padding: 0 8px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-1); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.as-opt > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-opt:hover { background: var(--fill-2); }
+.as-opt.as-none { color: var(--ink-3); }
+/* The selected option gets a coral check mark drawn from two borders. */
+.as-opt[aria-selected=true]::after {
+  content: ""; flex: none; width: 9px; height: 5px; margin: -3px 2px 0 8px;
+  border: solid var(--accent); border-width: 0 0 2px 2px; transform: rotate(-45deg);
+}
+
+/* Date popover: quick picks + Clear on top, month grid below */
+.as-quick { display: flex; gap: 4px; padding: 0 0 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.as-c {
+  flex: 1; height: 26px; padding: 0 6px; border: 0; border-radius: 7px;
+  background: var(--fill-1); color: var(--ink-1);
+  font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.as-c:hover { background: var(--fill-2); }
+.as-c[aria-pressed=true] { background: var(--accent); color: #fff; }
+/* Clear sits at the top: the bottom-right corner belongs to the host's Create task button. */
+.as-clear {
+  flex: none; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-2); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.as-clear:hover { background: var(--fill-2); color: var(--ink-1); }
+.as-clear:disabled { color: var(--ink-4); background: transparent; cursor: default; }
+
+.as-calh { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 4px; font-size: 12.5px; font-weight: 600; }
+.as-calh button {
+  width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-2); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.as-calh button:hover { background: var(--fill-2); }
+.as-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+.as-grid > span { font-size: 10px; color: var(--ink-4); padding: 2px 0 3px; }
+.as-grid > button {
+  height: 26px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-1); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.as-grid > button:hover { background: var(--fill-2); }
+.as-grid > button.as-past { color: var(--ink-4); }
+.as-grid > button.as-today { color: var(--accent); font-weight: 600; }
+.as-grid > button[aria-pressed=true] { background: var(--accent); color: #fff; }
+
+/* ---- Accessibility ---- */
+.as button:focus-visible, .as-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.as-title:focus-visible { outline: none; border-bottom-width: 3px; }
+@media (prefers-reduced-motion: reduce) { .as-val svg { transition: none; } }

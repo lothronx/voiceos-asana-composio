@@ -21,11 +21,19 @@ card** declared in the manifest, which the user can edit and approve.
   registered in server.ts with the same name, and vice versa. Keep
   `runtime` exactly as generated — VoiceOS resolves it to the launcher for
   the user's OS.
-- `server.ts` — standard MCP stdio server (@modelcontextprotocol/sdk + zod).
+- `server.ts` — standard MCP stdio server (@modelcontextprotocol/sdk + zod);
+  only wires `src/` to the tools. Must stay at the root (run.sh launches it).
+- `src/` — our code (run `bun test`):
+  - `composio.ts` — Composio HTTP client (`ExecuteTool`).
+  - `asana.ts` — Asana operations on an injected `ExecuteTool`.
+  - `due.ts` — turns due date/time args into Asana's `due_on` / `due_at`.
+  - `cards.ts` — `create_task`'s result and error glance cards.
+  - `*.test.ts` — unit tests; Asana logic is tested with a fake executor.
 - `run.sh` / `run.cmd` — the launchers VoiceOS invokes (macOS / Windows);
   leave them alone.
-- `build-confirm.ts` — source of `create_task`'s confirmation card; edit it,
-  then `bun build-confirm.ts` rewrites the card HTML in the manifest.
+- `confirm-card/` — source of `create_task`'s confirmation card
+  (`build.ts` markup, `card.css`, `card.js`); edit them, then
+  `bun confirm-card/build.ts` rewrites the card HTML in the manifest.
 - `package.json` — add dependencies here, then `bun install`.
 - `icon.png` / `studio-meta.json` — the Studio's icon and preview fixtures;
   safe to leave untouched.
