@@ -1,5 +1,5 @@
 /*
- * Styles for create_task's confirmation card (inlined by build.ts).
+ * Styles for the confirmation cards (inlined by build.ts).
  * Colour tokens (--ink-*, --fill-*, --line, --accent) come from widgetKit's base CSS
  * and switch with the notch theme; only --pop (the opaque popover surface) is ours.
  */

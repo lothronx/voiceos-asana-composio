@@ -30,7 +30,7 @@ card** declared in the manifest, which the user can edit and approve.
   which starts the MCP server only when run directly.
 - `run.sh` / `run.cmd` — the launchers VoiceOS invokes (macOS / Windows);
   leave them alone.
-- `confirm-card/` — (local tooling, not shipped) source of `create_task`'s confirmation card
+- `confirm-card/` — (local tooling, not shipped) source of the confirmation cards
   (`build.ts` markup, `card.css`, `card.js`); edit them, then
   `bun confirm-card/build.ts` rewrites the card HTML in the manifest.
 - `.env` (from `.env.example`) — the developer's Composio credentials; see
@@ -48,7 +48,7 @@ user, so they are **not** VoiceOS setup fields:
    `COMPOSIO_USER_ID` if not `default`). `server.ts` loads it on start.
 2. In platform.composio.dev → Connected accounts, connect **Asana** (OAuth2,
    Composio-managed) for that user_id. Re-connect there if it expires or is
-   revoked; `create_task` errors say which one happened.
+   revoked; tool errors say which one happened.
 
 ## Rules that make integrations feel native
 

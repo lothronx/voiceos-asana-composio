@@ -1060,7 +1060,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   }
 
   return {
-    resolveWorkspace, listOptions, optionsFor, createTask, findTasks, updateTask, searchTasks, getTask,
+    listOptions, optionsFor, createTask, findTasks, updateTask, searchTasks, getTask,
     addComment, setCompleted, completeFromCard, createProject, createGoal, findProjects, deleteProject,
   };
 }
