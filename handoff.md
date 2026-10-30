@@ -10,14 +10,25 @@ All runtime code is in `server.ts`. `AGENTS.md` has the file layout and the dev 
 3. In platform.composio.dev, open Connected accounts and connect Asana for that user_id.
 4. Run `bun test`.
 
+## Approved tools
+
+| Approved | Tool | Confirmation card | Helper the agent calls first |
+|---|---|---|---|
+| Create task | `create_task` | yes | `list_asana_options` (kind `task`) |
+| Update task | `update_task` | yes | `find_asana_tasks` |
+| Get task | `get_task` | no (read-only) | none |
+| Search tasks | `search_tasks` | no (read-only) | none |
+| Add story/comment | `add_comment` | yes | none |
+| Complete task | `complete_task` | yes | none (`set_task_done` is the circle on task cards) |
+| Create project | `create_project` | yes | `list_asana_options` (kind `project`) |
+| Delete project | `delete_project` | yes | `find_asana_projects` |
+| Create goal | `create_goal` | yes | `list_asana_options` (kind `goal`) |
+
 ## Differences from the spec
 
 ### 1. Four helper tools beyond the nine approved ones
 
-The nine approved tools are `create_task`, `update_task`, `get_task`, `search_tasks`, `add_comment`,
-`complete_task`, `create_project`, `delete_project` and `create_goal`.
-
-There are four more tools. Users don't see them (`visibility: "agent"`), and none of them adds a new Asana
+The helper column above names four more tools. Users don't see them (`visibility: "agent"`), and none of them adds a new Asana
 capability:
 
 | Tool | Serves | Why it exists |
