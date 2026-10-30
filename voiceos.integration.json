@@ -3,8 +3,8 @@
   "id": "com.voiceos.generated.asana-composio",
   "version": "1.0.0",
   "name": "Asana Tasks",
-  "summary": "Create tasks in Asana My Tasks via Composio with one voice request.",
-  "description": "Add tasks to your Asana 'My Tasks' through Composio (OAuth2). Pick a due date and time, a project and a My Tasks section on the confirmation card. Your primary workspace is detected automatically.",
+  "summary": "Manage Asana tasks, projects and goals by voice, through Composio.",
+  "description": "Create, update, search and complete Asana tasks, add comments, create projects and goals, and delete projects, all by voice through Composio (OAuth2). Every change shows a confirmation card first. Your primary workspace is detected automatically.",
   "supportedPlatforms": [
     "darwin",
     "win32"
