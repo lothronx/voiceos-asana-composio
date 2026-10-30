@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ComposioError, createComposio, isConnectionError } from "./composio.ts";
+import { ComposioError, createComposio, isConnectionError } from "../server.ts";
 
 /** A fetch that always answers with this status and JSON body, and records the last request. */
 function fakeFetch(status: number, body: unknown) {

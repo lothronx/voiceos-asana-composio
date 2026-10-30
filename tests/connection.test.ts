@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createAsanaConnection } from "./connection.ts";
-import type { ComposioRequest } from "./composio.ts";
+import { createAsanaConnection } from "../server.ts";
+import type { ComposioRequest } from "../server.ts";
 
 /** A fake Composio REST API that answers the accounts list and records the requested paths. */
 function fakeApi(items: object[]) {

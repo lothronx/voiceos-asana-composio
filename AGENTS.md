@@ -21,26 +21,20 @@ card** declared in the manifest, which the user can edit and approve.
   registered in server.ts with the same name, and vice versa. Keep
   `runtime` exactly as generated — VoiceOS resolves it to the launcher for
   the user's OS.
-- `server.ts` — standard MCP stdio server (@modelcontextprotocol/sdk + zod);
-  only wires `src/` to the tools. Must stay at the root (run.sh launches it).
-- `src/` — our code (run `bun test`):
-  - `composio.ts` — Composio HTTP client (`execute` for tools, `request`
-    for REST) and `isConnectionError` for missing/expired/revoked links.
-  - `asana.ts` — Asana operations on an injected `ExecuteTool`.
-  - `connection.ts` — the Asana link's status in Composio, used to explain
-    "not connected / expired / revoked" errors.
-  - `env.ts` — loads `.env` (VoiceOS's bundled Bun 1.3 has no
-    `process.loadEnvFile`).
-  - `due.ts` — turns due date/time args into Asana's `due_on` / `due_at`.
-  - `cards.ts` — `create_task`'s result and error glance cards.
-  - `*.test.ts` — unit tests; Asana logic is tested with a fake executor.
+- `server.ts` — the whole runtime in one file (MCP server, Composio client,
+  Asana operations, cards), in numbered sections. **Publish ships only
+  server.ts, widgetKit.ts, voiceos.integration.json, package.json and
+  icon.png**, so runtime code must not move to other files. Must stay at the
+  root (run.sh launches it). Its header documents the Composio setup.
+- `tests/` — `bun test` (local only, not shipped); they import `server.ts`,
+  which starts the MCP server only when run directly.
 - `run.sh` / `run.cmd` — the launchers VoiceOS invokes (macOS / Windows);
   leave them alone.
-- `confirm-card/` — source of `create_task`'s confirmation card
+- `confirm-card/` — (local tooling, not shipped) source of `create_task`'s confirmation card
   (`build.ts` markup, `card.css`, `card.js`); edit them, then
   `bun confirm-card/build.ts` rewrites the card HTML in the manifest.
 - `.env` (from `.env.example`) — the developer's Composio credentials; see
-  "Composio setup" below. Never share or commit it.
+  "Composio setup" below. Never shipped by Publish; never commit it.
 - `package.json` — add dependencies here, then `bun install`.
 - `icon.png` / `studio-meta.json` — the Studio's icon and preview fixtures;
   safe to leave untouched.

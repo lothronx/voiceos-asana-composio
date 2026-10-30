@@ -1,7 +1,7 @@
 process.env.TZ = "America/Chicago";
 import { expect, test } from "bun:test";
-import { createAsana } from "./asana.ts";
-import type { ExecuteTool } from "./composio.ts";
+import { createAsana } from "../server.ts";
+import type { ExecuteTool } from "../server.ts";
 
 /** A fake Composio: records every call and answers from a slug → handler table. */
 function fakeComposio(answers: Record<string, (args: any) => any>) {

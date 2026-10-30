@@ -1,6 +1,6 @@
 process.env.TZ = "America/Chicago";
 import { expect, test } from "bun:test";
-import { dueFields } from "./due.ts";
+import { dueFields } from "../server.ts";
 
 test("date only stays a date", () => {
   expect(dueFields("2026-10-31")).toEqual({ due_on: "2026-10-31" });

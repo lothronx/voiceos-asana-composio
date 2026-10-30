@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseEnv } from "./env.ts";
+import { parseEnv } from "../server.ts";
 
 test("reads KEY=value lines, strips quotes, skips comments and blanks", () => {
   const text = [
