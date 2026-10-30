@@ -1,8 +1,8 @@
 /**
  * Asana Tasks — the MCP server VoiceOS launches via run.sh (stdio; stdout is
- * the MCP wire, so log with console.error). Tools: create_task and
- * update_task, plus the agent-only helpers list_asana_options and
- * find_asana_tasks that feed their confirmation cards.
+ * the MCP wire, so log with console.error). Tools: create_task,
+ * update_task, search_tasks and get_task, plus the agent-only helpers
+ * list_asana_options and find_asana_tasks that feed the confirmation cards.
  *
  * Why one file: VoiceOS "Publish" ships only server.ts, widgetKit.ts,
  * voiceos.integration.json, package.json and icon.png. Every runtime line
@@ -210,6 +210,37 @@ export function dueFields(due_on?: string, due_time?: string): { due_on?: string
   return { due_at: at.toISOString() };
 }
 
+/**
+ * A due date as people say it, for cards: "Today 2:30 PM", "Tomorrow",
+ * "Fri 9:00 AM" (within the next week), "Yesterday", "Nov 12", "Nov 12, 2027".
+ * Input is "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" in local time; "" stays "".
+ */
+export function friendlyDue(due: string, now: Date = new Date()): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{1,2}):(\d{2}))?$/.exec(due.trim());
+  if (!m) return due;
+  const date = new Date(+m[1], +m[2] - 1, +m[3]);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((date.getTime() - today.getTime()) / 86_400_000);
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const day =
+    days === 0 ? "Today"
+    : days === 1 ? "Tomorrow"
+    : days === -1 ? "Yesterday"
+    : days > 1 && days < 7 ? DAYS[date.getDay()]
+    : `${MONTHS[date.getMonth()]} ${date.getDate()}${date.getFullYear() !== today.getFullYear() ? `, ${date.getFullYear()}` : ""}`;
+  if (m[4] === undefined) return day;
+  const h = +m[4];
+  return `${day} ${((h + 11) % 12) + 1}:${m[5]} ${h < 12 ? "AM" : "PM"}`;
+}
+
+/** True when an open task's due date is before today. */
+export function isOverdue(due: string, completed: boolean, now: Date = new Date()): boolean {
+  const day = due.slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return !completed && /^\d{4}-\d{2}-\d{2}$/.test(day) && day < `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
 /** The reverse of dueFields: a task's due_on / due_at as local date and "HH:MM" (time "" when date-only). */
 export function localDue(raw: { due_on?: string | null; due_at?: string | null }): { due_on: string; due_time: string } {
   if (raw.due_at) {
@@ -288,6 +319,62 @@ export interface UpdateResult {
   /** Set when the main update went through but moving project or section failed. */
   warning?: string;
 }
+
+/** search_tasks' filters; all optional. Dates are YYYY-MM-DD, inclusive, in the user's local time. */
+export interface TaskSearch {
+  query?: string;
+  /** "me" = assigned to the user; default: anyone. */
+  assignee?: "me" | "anyone";
+  /** A project name or gid. */
+  project?: string;
+  due_after?: string;
+  due_before?: string;
+  include_completed?: boolean;
+}
+
+/** One search hit, as the model and the list card see it. */
+export interface TaskSummary {
+  gid: string;
+  name: string;
+  completed: boolean;
+  due: string;
+  assignee: string;
+  projects: string[];
+  permalink_url: string;
+}
+
+export interface SearchResult {
+  tasks: TaskSummary[];
+  /** Matches before the result list was cut to `tasks`. */
+  total: number;
+  /** Set when Asana's advanced search wasn't available and a name-only search was used instead. */
+  note?: string;
+}
+
+/** Everything get_task reports about one task. */
+export interface TaskDetails {
+  gid: string;
+  name: string;
+  notes: string;
+  completed: boolean;
+  due: string;
+  /** `due` as a card shows it ("Today 2:30 PM"); search cards render it when a row expands. */
+  due_label: string;
+  assignee: string;
+  projects: string[];
+  section: string;
+  tags: string[];
+  parent: string;
+  created_at: string;
+  modified_at: string;
+  subtasks: { name: string; completed: boolean }[];
+  /** Newest last. */
+  comments: { author: string; text: string; created_at: string }[];
+  permalink_url: string;
+}
+
+/** Fields requested for search hits. */
+const SUMMARY_FIELDS = ["name", "completed", "due_on", "due_at", "permalink_url", "assignee", "assignee.name", "projects", "projects.name"];
 
 /** Fields requested from Asana when reading a task for find/update. */
 const TASK_FIELDS = [
@@ -574,7 +661,121 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     };
   }
 
-  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask };
+  /**
+   * Tasks across the workspace. Asana's advanced search (paid plans) finds
+   * the text in names and notes; on a free plan it falls back to name-only
+   * typeahead. Either way at most 100 candidates come back, and due date /
+   * completion / assignee / project filters are applied here, the same way
+   * for both paths. Open tasks first, then by due date.
+   */
+  async function searchTasks(filters: TaskSearch, limit = 20): Promise<SearchResult> {
+    const workspace = await resolveWorkspace();
+    const query = filters.query?.trim() ?? "";
+    const me = filters.assignee === "me" ? (await myTasks()).owner : undefined;
+    let projectGid: string | undefined;
+    if (filters.project?.trim()) {
+      const wanted = filters.project.trim().toLowerCase();
+      const { projects } = await listOptions();
+      const match = projects.find((p) => p.gid === filters.project!.trim() || p.name.toLowerCase() === wanted);
+      if (!match) throw new Error(`No project named "${filters.project}". Projects: ${projects.map((p) => p.name).join(", ")}.`);
+      projectGid = match.gid;
+    }
+
+    let raw: any[];
+    let note: string | undefined;
+    const typeahead = async () =>
+      (await execute("ASANA_GET_TYPEAHEAD_OBJECTS", {
+        workspace_gid: workspace.gid, resource_type: "task", query, count: 100, opt_fields: SUMMARY_FIELDS,
+      }))?.data ?? [];
+    try {
+      const args: Record<string, unknown> = { workspace_gid: workspace.gid, limit: 100, opt_fields: SUMMARY_FIELDS };
+      if (query) args.text = query;
+      if (me) args.assignee_any = ["me"];
+      if (projectGid) args.projects_any = [projectGid];
+      if (!query && !me && !projectGid) args.resource_subtype = "default_task"; // Asana needs at least one filter
+      raw = (await execute("ASANA_SEARCH_TASKS_IN_WORKSPACE", args))?.data ?? [];
+      // Advanced search indexes new tasks with a delay (about a minute); typeahead sees them at once.
+      if (query && raw.length === 0) raw = await typeahead();
+    } catch (err: any) {
+      // Advanced search is a paid-plan feature (Asana answers 402); anything else is a real failure.
+      const paywalled = (err instanceof ComposioError && err.status === 402) || /premium|payment required/i.test(String(err?.message));
+      if (!paywalled) throw err;
+      raw = await typeahead();
+      note = "Asana's advanced search needs a paid plan, so only task names were searched.";
+    }
+
+    const hits = raw
+      .map((t: any) => ({ t, due: localDue(t).due_on }))
+      .filter(({ t, due }) =>
+        (filters.include_completed || !t.completed) &&
+        (!me || t.assignee?.gid === me) &&
+        (!projectGid || (t.projects ?? []).some((p: any) => p.gid === projectGid)) &&
+        (!filters.due_after || (due && due >= filters.due_after)) &&
+        (!filters.due_before || (due && due <= filters.due_before)))
+      .sort((a: any, b: any) =>
+        Number(!!a.t.completed) - Number(!!b.t.completed) ||
+        (a.due || "9999").localeCompare(b.due || "9999") ||
+        String(a.t.name).localeCompare(String(b.t.name)));
+
+    return {
+      tasks: hits.slice(0, limit).map(({ t }: any) => {
+        const due = localDue(t);
+        return {
+          gid: String(t.gid),
+          name: String(t.name ?? ""),
+          completed: !!t.completed,
+          due: [due.due_on, due.due_time].filter(Boolean).join(" "),
+          assignee: t.assignee?.name ? String(t.assignee.name) : "",
+          projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
+          permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
+        };
+      }),
+      total: hits.length,
+      note,
+    };
+  }
+
+  /** One task in full: its fields, its subtasks and its latest comments (3 reads in parallel). */
+  async function getTask(task_gid: string): Promise<TaskDetails> {
+    const [taskRes, subtasksRes, storiesRes] = await Promise.all([
+      execute("ASANA_GET_A_TASK", {
+        task_gid,
+        opt_fields: [
+          "name", "notes", "completed", "due_on", "due_at", "permalink_url", "created_at", "modified_at",
+          "assignee.name", "assignee_section.name", "projects.name", "tags.name", "parent.name",
+        ],
+      }),
+      execute("ASANA_GET_TASK_SUBTASKS", { task_gid, limit: 50, opt_fields: ["name", "completed"] }),
+      execute("ASANA_GET_STORIES_FOR_TASK", { task_gid, limit: 100, opt_fields: ["created_at", "created_by.name", "text", "resource_subtype"] }),
+    ]);
+    const t = taskRes?.data;
+    if (!t?.gid) throw new Error("Asana returned no task for that ID.");
+    const due = localDue(t);
+    return {
+      gid: String(t.gid),
+      name: String(t.name ?? ""),
+      notes: String(t.notes ?? ""),
+      completed: !!t.completed,
+      due: [due.due_on, due.due_time].filter(Boolean).join(" "),
+      due_label: friendlyDue([due.due_on, due.due_time].filter(Boolean).join(" ")),
+      assignee: t.assignee?.name ? String(t.assignee.name) : "",
+      projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
+      section: t.assignee_section?.name ? String(t.assignee_section.name) : "",
+      tags: (t.tags ?? []).map((x: any) => String(x.name ?? "")).filter(Boolean),
+      parent: t.parent?.name ? String(t.parent.name) : "",
+      created_at: String(t.created_at ?? ""),
+      modified_at: String(t.modified_at ?? ""),
+      subtasks: (subtasksRes?.data ?? []).map((x: any) => ({ name: String(x.name ?? ""), completed: !!x.completed })),
+      // Stories mix comments with system events ("changed the due date"); keep the latest 3 comments.
+      comments: (storiesRes?.data ?? [])
+        .filter((x: any) => x.resource_subtype === "comment_added")
+        .slice(-3)
+        .map((x: any) => ({ author: String(x.created_by?.name ?? ""), text: String(x.text ?? ""), created_at: String(x.created_at ?? "") })),
+      permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
+    };
+  }
+
+  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask, searchTasks, getTask };
 }
 
 export type Asana = ReturnType<typeof createAsana>;
@@ -611,8 +812,9 @@ export type AsanaConnection = ReturnType<typeof createAsanaConnection>;
 
 // ============================================================================
 // 6. Result / error cards
-// The glance cards create_task attaches to its result. Pure rendering, no I/O.
-// The confirmation card shown *before* creating is built into the manifest.
+// The glance cards tools attach to their results: created/updated task,
+// search hits, task details, errors. Pure rendering, no I/O. Confirmation
+// cards shown *before* writing are built into the manifest (confirm-card/).
 // ============================================================================
 
 const ACCENT = "#f06a6a"; // Asana coral brand accent
@@ -752,6 +954,112 @@ html[data-k-theme=light] .as-pill{
   .as-meta{animation:asIn .24s cubic-bezier(.22,.61,.36,1) .04s both}
 }
 @keyframes asIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.as-rows{
+  display:flex;
+  flex-direction:column;
+  gap:1px;
+  margin:0 -6px 8px;
+  max-height:300px;
+  overflow-y:auto;
+}
+.as-row{
+  display:flex;
+  align-items:center;
+  gap:9px;
+  min-height:28px;
+  padding:0 6px;
+  border-radius:7px;
+  cursor:pointer;
+}
+.as-row:hover,.as-row[aria-expanded=true]{
+  background:var(--fill-1);
+}
+.as-late{
+  color:var(--bad) !important;
+}
+.as-x{
+  margin:0 6px 6px 27px;
+  padding:2px 0 4px;
+  font-size:12px;
+  line-height:1.45;
+  color:var(--ink-2);
+}
+.as-x > div{
+  margin-top:3px;
+}
+.as-x .as-x-desc{
+  color:var(--ink-1);
+  display:-webkit-box;
+  -webkit-line-clamp:3;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  word-break:break-word;
+}
+.as-x .as-x-meta,.as-x .as-x-dim{
+  color:var(--ink-3);
+}
+.as-x a{
+  color:var(--accent);
+  font-weight:600;
+  text-decoration:none;
+}
+.as-row-name{
+  flex:1;
+  min-width:0;
+  font-size:13px;
+  font-weight:500;
+  color:var(--ink-1);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.as-row.as-done .as-row-name{
+  color:var(--ink-3);
+  text-decoration:line-through;
+}
+.as-row-due{
+  flex:none;
+  font-size:11px;
+  color:var(--ink-3);
+  font-variant-numeric:tabular-nums;
+}
+.as-dotring{
+  flex:none;
+  width:12px;
+  height:12px;
+  border-radius:50%;
+  border:1.5px solid var(--ink-4);
+  box-sizing:border-box;
+}
+.as-done .as-dotring{
+  border-color:var(--accent);
+  background:var(--accent);
+}
+.as-desc{
+  margin-top:6px;
+  padding-left:25px;
+  font-size:12.5px;
+  line-height:1.45;
+  color:var(--ink-2);
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  word-break:break-word;
+}
+.as-foot{
+  font-size:11.5px;
+  line-height:1.45;
+  color:var(--ink-3);
+  margin-bottom:8px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.as-foot b{
+  font-weight:600;
+  color:var(--ink-2);
+}
 `;
 
 // Inline icons (cards can't load images over the network).
@@ -789,12 +1097,144 @@ export function successCard(
       <div class="as-meta">
         <div class="as-pill">${esc(clip(placePill, 18))}</div>
         ${task.project ? `<div class="as-pill">${esc(clip(task.project, 18))}</div>` : ""}
-        ${task.due ? `<div class="as-pill as-due">${CALENDAR_ICON}<span>${esc(task.due)}</span></div>` : ""}
+        ${task.due ? `<div class="as-pill as-due">${CALENDAR_ICON}<span>${esc(friendlyDue(task.due))}</span></div>` : ""}
         <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>
       </div>
     </div>
   `;
   return renderCustom({ accent: ACCENT, css: CSS, body, height: 135 });
+}
+
+/**
+ * Opens a search row in place: asks get_task (uiCallable) for the details and
+ * renders them under the row. Without the host's tool bridge (older hosts) a
+ * row opens the task in Asana instead.
+ */
+const LIST_CARD_SCRIPT = `(function(){
+  var cache = {}, busy = false;
+  /* The host returns the tool's MCP result; be lenient about its exact shape. */
+  function payload(m) {
+    var r = m && m.result;
+    if (r && r.content && r.content[0] && typeof r.content[0].text === 'string') r = r.content[0].text;
+    if (typeof r === 'string') { try { return JSON.parse(r); } catch (e) { return { error: r }; } }
+    return r || {};
+  }
+  function line(parent, cls, text) {
+    if (!text) return;
+    var d = document.createElement('div'); d.className = cls; d.textContent = text; parent.appendChild(d);
+  }
+  function details(row, data) {
+    var x = document.createElement('div'); x.className = 'as-x';
+    var t = data && data.task;
+    if (!t) { line(x, 'as-x-dim', (data && data.error) || 'No details came back.'); return x; }
+    line(x, 'as-x-desc', t.notes);
+    line(x, 'as-x-meta', [t.due_label, (t.projects || [])[0], t.section, t.assignee || 'Unassigned'].filter(Boolean).join('  ·  '));
+    if (t.subtasks && t.subtasks.length) {
+      var done = t.subtasks.filter(function (s) { return s.completed; }).length;
+      line(x, 'as-x-dim', 'Subtasks ' + done + '/' + t.subtasks.length + ' done');
+    }
+    var c = t.comments && t.comments[t.comments.length - 1];
+    if (c) line(x, 'as-x-dim', c.author + ': ' + c.text);
+    var a = document.createElement('a'); a.href = t.permalink_url; a.textContent = 'Open in Asana';
+    var wrap = document.createElement('div'); wrap.appendChild(a); x.appendChild(wrap);
+    return x;
+  }
+  function toggle(row, panel) {
+    var open = row.nextElementSibling && row.nextElementSibling.classList.contains('as-x');
+    if (open) { row.parentNode.removeChild(row.nextElementSibling); row.setAttribute('aria-expanded', 'false'); return; }
+    row.parentNode.insertBefore(panel, row.nextSibling); row.setAttribute('aria-expanded', 'true');
+  }
+  document.addEventListener('click', function (e) {
+    var row = e.target && e.target.closest && e.target.closest('.as-row[data-gid]');
+    if (!row) return;
+    var v = window.voiceos;
+    if (!v || !v.canInvokeTools) { parent.postMessage({ type: 'voiceos:openUrl', url: row.getAttribute('data-url') }, '*'); return; }
+    var gid = row.getAttribute('data-gid');
+    if (cache[gid]) { toggle(row, details(row, cache[gid])); return; }
+    if (busy) return; /* the host allows one pending action per card */
+    busy = true;
+    var due = row.querySelector('.as-row-due'), before = due ? due.textContent : '';
+    if (due) due.textContent = 'Loading…'; else row.insertAdjacentHTML('beforeend', '<span class="as-row-due">Loading…</span>');
+    v.invokeTool('get_task', { task_gid: gid }).then(function (m) {
+      var data = m.status === 'completed' ? payload(m) : { error: m.error || ('Could not load details (' + m.status + ').') };
+      if (m.status === 'completed' && data.task) cache[gid] = data;
+      toggle(row, details(row, data));
+    }).finally(function () {
+      busy = false;
+      var d = row.querySelector('.as-row-due');
+      if (before) d.textContent = before; else if (d) d.parentNode.removeChild(d);
+    });
+  });
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('as-row')) { e.preventDefault(); e.target.click(); }
+  });
+})();`;
+
+/** search_tasks' result (also get_task's "which one?" when several match): every hit, scrollable, each row opens in place. */
+export function taskListCard(title: string, { tasks, total, note }: SearchResult): RenderedWidget {
+  const rows = tasks.map((t) => {
+    const due = friendlyDue(t.due);
+    return `
+        <div class="as-row${t.completed ? " as-done" : ""}" role="button" tabindex="0" aria-expanded="false" data-gid="${esc(t.gid)}" data-url="${esc(t.permalink_url)}">
+          <span class="as-dotring"></span>
+          <span class="as-row-name">${esc(clip(t.name, 60))}</span>
+          ${due ? `<span class="as-row-due${isOverdue(t.due, t.completed) ? " as-late" : ""}">${esc(due)}</span>` : ""}
+        </div>`;
+  }).join("");
+  const more = total - tasks.length;
+  const body = `
+    <div class="as">
+      <div class="as-head">
+        ${markHtml()}
+        <span class="as-chip">${esc(clip(title, 30))}</span>
+        <span class="as-tag">${total === 0 ? "No tasks" : total === 1 ? "1 task" : `${total} tasks`}</span>
+      </div>
+      ${tasks.length ? `<div class="as-rows">${rows}</div>` : ""}
+      ${more > 0 ? `<div class="as-foot">+${more} more — narrow the search to see them</div>` : ""}
+      ${note ? `<div class="as-foot">${esc(note)}</div>` : ""}
+    </div>
+    <script>${LIST_CARD_SCRIPT}</script>
+  `;
+  const listHeight = Math.min(300, 29 * tasks.length);
+  return renderCustom({ accent: ACCENT, css: CSS, body, height: Math.min(420, 52 + listHeight + (more > 0 ? 22 : 0) + (note ? 22 : 0)) });
+}
+
+/** get_task's result: status, title, description, key fields, subtask progress and the latest comment. */
+export function taskDetailsCard(task: TaskDetails): RenderedWidget {
+  const done = task.subtasks.filter((x) => x.completed).length;
+  const comment = task.comments.at(-1);
+  const pills = [
+    task.due ? `<div class="as-pill as-due${isOverdue(task.due, task.completed) ? " as-late" : ""}">${CALENDAR_ICON}<span>${esc(task.due_label)}</span></div>` : "",
+    ...task.projects.slice(0, 1).map((p) => `<div class="as-pill">${esc(clip(p, 18))}</div>`),
+    task.section ? `<div class="as-pill">${esc(clip(task.section, 14))}</div>` : "",
+    `<div class="as-pill">${esc(clip(task.assignee || "Unassigned", 16))}</div>`,
+  ].join("");
+  const body = `
+    <div class="as">
+      <div class="as-head">
+        ${markHtml()}
+        <span class="as-chip">TASK</span>
+        <span class="as-tag ${task.completed ? "as-success" : ""}">${task.completed ? "Completed" : "Open"}</span>
+      </div>
+      <div class="as-card">
+        <div class="as-trow">
+          <div class="as-ring">${task.completed ? CHECK_ICON : `<span class="as-dotring"></span>`}</div>
+          <div class="as-title">${esc(clip(task.name, 90))}</div>
+        </div>
+        ${task.notes ? `<div class="as-desc">${esc(clip(task.notes, 160))}</div>` : ""}
+      </div>
+      ${task.subtasks.length ? `<div class="as-foot"><b>Subtasks</b> ${done}/${task.subtasks.length} done</div>` : ""}
+      ${comment ? `<div class="as-foot"><b>${esc(clip(comment.author, 20))}:</b> ${esc(clip(comment.text, 90))}</div>` : ""}
+      <div class="as-meta">
+        ${pills}
+        <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>
+      </div>
+    </div>
+  `;
+  return renderCustom({
+    accent: ACCENT, css: CSS, body,
+    height: 135 + (task.notes ? 36 : 0) + (task.subtasks.length ? 22 : 0) + (comment ? 22 : 0),
+  });
 }
 
 /** The card when a tool failed; the message is the same text the model gets. */
@@ -977,6 +1417,70 @@ async function main(): Promise<void> {
         const { error, reconnect } = await describeError(err, connection, userId);
         const card = errorCard(args.name || "Update task", error);
         return textResult({ error, reconnect, task_gid: args.task_gid, _voiceos_glance: glance(card) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "search_tasks",
+    {
+      title: "Search tasks",
+      description: "Search tasks in the user's Asana workspace by text (task name and description), assignee, project, due date range or completion. Use when the user asks to find, list or look up tasks, e.g. \"what's due this week\", \"my overdue tasks\", \"tasks about the launch\". Resolve relative dates to YYYY-MM-DD yourself (overdue: due_before = yesterday). Returns up to 20 tasks, open ones first, by due date.",
+      inputSchema: {
+        query: z.string().optional().describe("Words to look for in task names and descriptions"),
+        assignee: z.enum(["me", "anyone"]).optional().describe("\"me\" for the user's own tasks; default anyone"),
+        project: z.string().optional().describe("A project name (or gid) to search in"),
+        due_after: z.string().optional().describe("Only tasks due on or after this date, YYYY-MM-DD"),
+        due_before: z.string().optional().describe("Only tasks due on or before this date, YYYY-MM-DD"),
+        include_completed: z.boolean().optional().describe("Also return completed tasks; default false"),
+      } as any,
+    },
+    async (args: TaskSearch) => {
+      try {
+        const result = await asana.searchTasks(args);
+        return textResult({ ...result, _voiceos_glance: glance(taskListCard("Search", result)) });
+      } catch (err) {
+        console.error("search_tasks failed:", err);
+        const { error, reconnect } = await describeError(err, connection, userId);
+        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard("Search tasks", error)) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_task",
+    {
+      title: "Get task",
+      description: "Show the details of one Asana task: description, due date, assignee, projects, section, tags, subtasks and the latest comments. Use when the user asks about a specific task, e.g. \"what's the status of X\" or \"what are the details of X\". Pass task_gid when you have it (from search_tasks), otherwise the task's name as query. If several tasks match, the result lists them instead: ask the user which one, then call again with its task_gid.",
+      inputSchema: {
+        task_gid: z.string().optional().describe("The task's gid, e.g. from search_tasks"),
+        query: z.string().optional().describe("The task's name, when the gid isn't known"),
+      } as any,
+    },
+    async (args: { task_gid?: string; query?: string }) => {
+      try {
+        let gid = args.task_gid?.trim();
+        if (!gid) {
+          const q = args.query?.trim();
+          if (!q) throw new Error("Say which task: give its name or gid.");
+          const found = await asana.searchTasks({ query: q, include_completed: true }, 5);
+          // Only pick for the user when it's unambiguous; otherwise show the candidates.
+          const exact = found.tasks.filter((t) => t.name.toLowerCase() === q.toLowerCase());
+          const pick = exact.length === 1 ? exact[0] : found.total === 1 ? found.tasks[0] : undefined;
+          if (!pick) {
+            const next = found.total === 0
+              ? `No task matches "${q}".`
+              : "Several tasks match: ask the user which one, then call get_task with its task_gid.";
+            return textResult({ matches: found.tasks, total: found.total, next, _voiceos_glance: glance(taskListCard("Which task?", found)) });
+          }
+          gid = pick.gid;
+        }
+        const task = await asana.getTask(gid);
+        return textResult({ task, _voiceos_glance: glance(taskDetailsCard(task)) });
+      } catch (err) {
+        console.error("get_task failed:", err);
+        const { error, reconnect } = await describeError(err, connection, userId);
+        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard("Get task", error)) }, true);
       }
     },
   );

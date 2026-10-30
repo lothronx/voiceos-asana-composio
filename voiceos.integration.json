@@ -268,6 +268,65 @@
           "confirmLabel": "Update task"
         }
       }
+    },
+    {
+      "name": "search_tasks",
+      "title": "Search tasks",
+      "description": "Search tasks in the user's Asana workspace by text (task name and description), assignee, project, due date range or completion. Use when the user asks to find, list or look up tasks, e.g. \"what's due this week\", \"my overdue tasks\", \"tasks about the launch\". Resolve relative dates to YYYY-MM-DD yourself (overdue: due_before = yesterday). Returns up to 20 tasks, open ones first, by due date.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Words to look for in task names and descriptions"
+          },
+          "assignee": {
+            "type": "string",
+            "enum": [
+              "me",
+              "anyone"
+            ],
+            "description": "\"me\" for the user's own tasks; default anyone"
+          },
+          "project": {
+            "type": "string",
+            "description": "A project name (or gid) to search in"
+          },
+          "due_after": {
+            "type": "string",
+            "description": "Only tasks due on or after this date, YYYY-MM-DD"
+          },
+          "due_before": {
+            "type": "string",
+            "description": "Only tasks due on or before this date, YYYY-MM-DD"
+          },
+          "include_completed": {
+            "type": "boolean",
+            "description": "Also return completed tasks; default false"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "get_task",
+      "title": "Get task",
+      "description": "Show the details of one Asana task: description, due date, assignee, projects, section, tags, subtasks and the latest comments. Use when the user asks about a specific task, e.g. \"what's the status of X\" or \"what are the details of X\". Pass task_gid when you have it (from search_tasks), otherwise the task's name as query. If several tasks match, the result lists them instead: ask the user which one, then call again with its task_gid.",
+      "uiCallable": true,
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_gid": {
+            "type": "string",
+            "description": "The task's gid, e.g. from search_tasks"
+          },
+          "query": {
+            "type": "string",
+            "description": "The task's name, when the gid isn't known"
+          }
+        },
+        "required": []
+      }
     }
   ],
   "icon": "icon.png"
