@@ -24,11 +24,11 @@
  *     voiceos.integration.json `preferences` before release.
  *   - In platform.composio.dev → Connected accounts, connect Asana (OAuth2,
  *     Composio-managed) for that user_id. Reconnect there if it expires or is
- *     revoked; create_task errors say which one happened.
+ *     revoked; tool errors say which one happened.
  *
  * Tool names, descriptions and input schemas must stay identical to
  * voiceos.integration.json — VoiceOS routes and confirms from the manifest.
- * create_task's confirmation card is generated into the manifest by
+ * The confirmation cards are generated into the manifest by
  * confirm-card/build.ts (local tooling, not shipped).
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -161,17 +161,27 @@ export function createComposio(config: ComposioConfig): { execute: ExecuteTool; 
     return json.data;
   };
 
+  // The connected account id only changes when the user reconnects; any failure drops it so the next call looks again.
+  const accountIds = new Map<string, string>();
   const proxy: ProxyCall = async (toolkit, method, url, body) => {
     // The proxy needs the connected account id, plus user_id when the project enforces 2FA.
-    const query = new URLSearchParams({ toolkit_slugs: toolkit, user_ids: config.userId, statuses: "ACTIVE" });
-    const accountId = (await request("GET", `/connected_accounts?${query}`))?.items?.[0]?.id;
+    let accountId = accountIds.get(toolkit);
     if (!accountId) {
-      throw new ComposioError(`No active ${toolkit} connection for user ${config.userId}`, "composio", 404, "Proxy_ConnectedAccountNotFound");
+      const query = new URLSearchParams({ toolkit_slugs: toolkit, user_ids: config.userId, statuses: "ACTIVE" });
+      accountId = (await request("GET", `/connected_accounts?${query}`))?.items?.[0]?.id;
+      if (!accountId) {
+        throw new ComposioError(`No active ${toolkit} connection for user ${config.userId}`, "composio", 404, "Proxy_ConnectedAccountNotFound");
+      }
+      accountIds.set(toolkit, accountId);
     }
     const json = await request("POST", "/tools/execute/proxy", {
       endpoint: url, method, body, user_id: config.userId, connected_account_id: accountId,
+    }).catch((err) => {
+      accountIds.delete(toolkit);
+      throw err;
     });
     if (!json || !(json.status < 400)) {
+      accountIds.delete(toolkit);
       throw new ComposioError(json?.data?.errors?.[0]?.message || `${toolkit} HTTP ${json?.status}`, "tool", json?.status);
     }
     return json.data;
@@ -260,6 +270,15 @@ export function localDue(raw: { due_on?: string | null; due_at?: string | null }
 // Asana's payload sits at `data.data`.
 // ============================================================================
 
+/** A task's due as "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" in local time ("" when none). */
+const dueText = (raw: any) => {
+  const d = localDue(raw);
+  return [d.due_on, d.due_time].filter(Boolean).join(" ");
+};
+
+/** Asana's link to an object, or the gid-only form when the response left it out. */
+const linkOf = (raw: any) => raw.permalink_url || `https://app.asana.com/0/0/${raw.gid}`;
+
 /** A pickable Asana object (workspace, project, section): its gid and display name. */
 export type Choice = { gid: string; name: string };
 
@@ -288,8 +307,18 @@ export interface CreatedTask {
 
 export interface CreateResult {
   task: CreatedTask;
-  /** Set when the main write went through but a follow-up step (project move, unassign) failed. */
-  warning?: string;
+}
+
+/** A raw Asana task as the result cards show it. */
+function taskOut(t: any): CreatedTask {
+  return {
+    gid: String(t.gid),
+    name: String(t.name ?? ""),
+    section: String(t.assignee_section?.name || "My Tasks"),
+    project: t.projects?.[0]?.name ? String(t.projects[0].name) : "",
+    due: dueText(t),
+    permalink_url: linkOf(t),
+  };
 }
 
 /**
@@ -499,10 +528,9 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     if (!gid) return;
     const actual = real.find((c) => c.gid === gid);
     if (!actual) throw new Error(`There is no ${kind} ${gid} in your Asana. Nothing was changed.`);
-    const label = shown?.find((c) => c.gid === gid)?.name;
-    if (label !== undefined && label !== actual.name) {
-      throw new Error(`The card showed ${kind} "${label}", but it is "${actual.name}". Nothing was changed.`);
-    }
+    // The card matches the untrimmed value, so check every entry that trims to this gid.
+    const wrong = shown?.find((c) => String(c.gid).trim() === gid && c.name !== actual.name);
+    if (wrong) throw new Error(`The card showed ${kind} "${wrong.name}", but it is "${actual.name}". Nothing was changed.`);
   }
 
   /** The projects and My Tasks sections the confirmation cards offer as choices. */
@@ -578,16 +606,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     const raw = (await execute("ASANA_CREATE_A_TASK", { data }))?.data ?? {};
     if (!raw.gid) throw new Error("Asana returned no task ID — the task may not have been created.");
 
-    return {
-      task: {
-        gid: String(raw.gid),
-        name: String(raw.name || input.name),
-        section: String(raw.assignee_section?.name || "My Tasks"),
-        project: raw.projects?.[0]?.name ? String(raw.projects[0].name) : "",
-        due: raw.due_at ? `${input.due_on} ${input.due_time}` : String(raw.due_on || ""),
-        permalink_url: raw.permalink_url || `https://app.asana.com/0/0/${raw.gid}`,
-      },
-    };
+    return { task: taskOut(raw) };
   }
 
   /**
@@ -740,17 +759,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     // Project moves and the proxy unassign don't return the task; only they need a fresh read.
     const movedElsewhere = changed.includes("project") || (reassigned && !assignee) || warnings.length > 0;
     const final = changed.length === 0 ? live : updated?.gid && !movedElsewhere ? updated : await read();
-    const due = localDue(final);
     return {
-      task: {
-        gid: String(final.gid),
-        name: String(final.name ?? ""),
-        section: String(final.assignee_section?.name || "My Tasks"),
-        project: final.projects?.[0]?.name ? String(final.projects[0].name) : "",
-        due: [due.due_on, due.due_time].filter(Boolean).join(" "),
-        assignee: final.assignee?.name ? String(final.assignee.name) : "",
-        permalink_url: final.permalink_url || `https://app.asana.com/0/0/${final.gid}`,
-      },
+      task: { ...taskOut(final), assignee: final.assignee?.name ? String(final.assignee.name) : "" },
       changed,
       warning: warnings.length > 0 ? `Task updated, but ${warnings.join("; ")}.` : undefined,
     };
@@ -813,18 +823,15 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
         String(a.t.name).localeCompare(String(b.t.name)));
 
     return {
-      tasks: hits.slice(0, limit).map(({ t }: any) => {
-        const due = localDue(t);
-        return {
-          gid: String(t.gid),
-          name: String(t.name ?? ""),
-          completed: !!t.completed,
-          due: [due.due_on, due.due_time].filter(Boolean).join(" "),
-          assignee: t.assignee?.name ? String(t.assignee.name) : "",
-          projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
-          permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
-        };
-      }),
+      tasks: hits.slice(0, limit).map(({ t }: any) => ({
+        gid: String(t.gid),
+        name: String(t.name ?? ""),
+        completed: !!t.completed,
+        due: dueText(t),
+        assignee: t.assignee?.name ? String(t.assignee.name) : "",
+        projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
+        permalink_url: linkOf(t),
+      })),
       total: hits.length,
       note,
     };
@@ -845,7 +852,7 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     ]);
     const t = taskRes?.data;
     if (!t?.gid) throw new Error("Asana returned no task for that ID.");
-    const due = localDue(t);
+    const due = dueText(t);
     return {
       gid: String(t.gid),
       name: String(t.name ?? ""),
@@ -853,19 +860,20 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
       // Notes stay whole: the model may write them back via update_task. Comments are capped.
       notes: String(t.notes ?? ""),
       completed: !!t.completed,
-      due: [due.due_on, due.due_time].filter(Boolean).join(" "),
-      due_label: friendlyDue([due.due_on, due.due_time].filter(Boolean).join(" ")),
+      due,
+      due_label: friendlyDue(due),
       assignee: t.assignee?.name ? String(t.assignee.name) : "",
       projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
       section: t.assignee_section?.name ? String(t.assignee_section.name) : "",
       tags: (t.tags ?? []).map((x: any) => String(x.name ?? "")).filter(Boolean),
       subtasks: (subtasksRes?.data ?? []).map((x: any) => ({ name: String(x.name ?? ""), completed: !!x.completed })),
       // Stories mix comments with system events ("changed the due date"); keep the latest 3 comments.
+      // shortcut: only the oldest 100 stories are read, so busier tasks show older comments; page via next_page if that bites.
       comments: (storiesRes?.data ?? [])
         .filter((x: any) => x.resource_subtype === "comment_added")
         .slice(-3)
         .map((x: any) => ({ author: String(x.created_by?.name ?? ""), text: clip(String(x.text ?? ""), 500), created_at: String(x.created_at ?? "") })),
-      permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
+      permalink_url: linkOf(t),
     };
   }
 
@@ -894,26 +902,13 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     const res = await execute("ASANA_CREATE_TASK_COMMENT", { task_id: String(live.gid), text });
     const story = res?.data ?? res; // this tool returns the story itself, not wrapped in data
     return {
-      task: { gid: String(live.gid), name: String(live.name ?? ""), permalink_url: live.permalink_url || `https://app.asana.com/0/0/${live.gid}` },
+      task: { gid: String(live.gid), name: String(live.name ?? ""), permalink_url: linkOf(live) },
       comment: { author: String(story?.created_by?.name ?? ""), text: String(story?.text ?? text), created_at: String(story?.created_at ?? "") },
     };
   }
 
-  const completeResult = (t: any, completed: boolean, changed: boolean): CompleteResult => {
-    const due = localDue(t);
-    return {
-      task: {
-        gid: String(t.gid),
-        name: String(t.name ?? ""),
-        section: String(t.assignee_section?.name || "My Tasks"),
-        project: t.projects?.[0]?.name ? String(t.projects[0].name) : "",
-        due: [due.due_on, due.due_time].filter(Boolean).join(" "),
-        permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
-        completed,
-      },
-      changed,
-    };
-  };
+  const completeResult = (t: any, completed: boolean, changed: boolean): CompleteResult =>
+    ({ task: { ...taskOut(t), completed }, changed });
 
   /** Completes (or, with completed: false, reopens) any task the user can see; voice path, name-checked. */
   async function setCompleted(input: TaskRef & { completed?: boolean }): Promise<CompleteResult> {
@@ -1284,13 +1279,13 @@ export function glance(card: RenderedWidget) {
   return { blocks: [{ type: "widget", html: card.html, height: card.height }] };
 }
 
-/** The card after a successful create or update; a warning (e.g. section move failed) turns the status tag red. */
+/** The card after a successful create or update; an update's warning (e.g. project move failed) turns the status tag red. */
 export function successCard(
-  { task, warning }: CreateResult,
+  { task, warning }: { task: CreatedTask; warning?: string },
   /** Status tag text (default: create's wording); `assignee` replaces the section pill once a task left My Tasks. */
   opts: { status?: string; assignee?: string } = {},
 ): RenderedWidget {
-  const status = opts.status ?? (warning ? "Created · section not set" : "Created in Asana");
+  const status = opts.status ?? "Created in Asana";
   const placePill = opts.assignee !== undefined ? opts.assignee || "Unassigned" : task.section;
   const body = `
     <div class="as">

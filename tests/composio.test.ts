@@ -83,3 +83,24 @@ test("proxy without an active account is a connection error; an app error status
   const err = await failure(forbidden.proxy("asana", "PUT", "x"));
   expect(err.message).toBe("Forbidden");
 });
+
+test("proxy looks the account up once, and again after a failure", async () => {
+  const urls: string[] = [];
+  let fail = false;
+  const fetchFn = (async (url: string) => {
+    urls.push(url);
+    if (url.includes("/connected_accounts")) return new Response(JSON.stringify({ items: [{ id: "ca_1" }] }));
+    return new Response(JSON.stringify(fail ? { status: 404, data: {} } : { status: 200, data: { ok: 1 } }));
+  }) as unknown as typeof fetch;
+  const { proxy } = createComposio({ apiKey: "ak", userId: "u1", fetch: fetchFn });
+  const lookups = () => urls.filter((u) => u.includes("/connected_accounts")).length;
+
+  await proxy("asana", "POST", "x");
+  await proxy("asana", "POST", "x");
+  expect(lookups()).toBe(1);
+  fail = true;
+  await failure(proxy("asana", "POST", "x"));
+  fail = false;
+  await proxy("asana", "POST", "x");
+  expect(lookups()).toBe(2);
+});
