@@ -116,10 +116,11 @@ ${menuRow("time_period", "Period", "No time period")}`),
 <div class="as-target"><span class="as-target-name" data-arg="project_name"></span></div>
 <div class="as-warn" role="alert">
 <div class="as-warn-title"><span data-arg="tasks_deleted"></span> will be deleted with it</div>
+<div>Subtasks are deleted with their parent task.</div>
 <div>Tasks with an assignee or in another project are kept.</div>
 <div>This can't be undone.</div>
 </div>`),
-    height: 185,
+    height: 213,
     script: SIMPLE_SCRIPT,
   },
   add_comment: {

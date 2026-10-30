@@ -55,10 +55,7 @@ The user talks to VoiceOS. The agent picks one of the 9 approved tools below.
   - Rescheduling a task: about 1.7 s.
   - Clicking the circle: about 1 s, and the card shows the change right away.
   - Deleting a project: about 2.7 s.
-- **Not tested:**
-  - a real expired or revoked token (the error messages are covered by unit tests only);
-  - whether Asana also deletes the subtasks of the tasks it removes with a project (the delete card doesn't count
-    subtasks).
+- **Not tested:** a real expired or revoked token. The error messages are covered by unit tests only.
 
 ## Differences from the spec
 
@@ -87,7 +84,8 @@ link is missing, expired or revoked, the tool error says which one and where to 
   - Read the object back after a write instead of trusting the request.
 - **Goals go through the proxy.** Composio has no create-goal tool. Asana returns no link for a goal.
 - **Deleting a project doesn't delete all of its tasks.** Asana deletes only the tasks that are unassigned and in no
-  other project. Assigned tasks stay in My Tasks. We checked this against real Asana.
+  other project. Assigned tasks stay in My Tasks. Subtasks go with their parent task, even assigned ones. The card's count
+  doesn't include them. We checked this against real Asana.
 - **Search depends on the Asana plan.** Advanced search needs a paid plan. On a free plan, search falls back to
   matching task names only. A brand-new task takes about a minute to show up in search.
 - **The server checks every card before writing.** Card labels come from the agent, so the server confirms that each
