@@ -16,12 +16,19 @@ function fakeComposio(answers: Record<string, (args: any) => any>) {
 }
 
 const WORKSPACES = { ASANA_GET_MULTIPLE_WORKSPACES: () => ({ data: [{ gid: "1", name: "Main" }] }) };
+/** The real lists createTask verifies a picked project/section against. */
+const LISTS = {
+  ...WORKSPACES,
+  ASANA_GET_A_USER_TASK_LIST: () => ({ data: { gid: "300", owner: { gid: "me1" } } }),
+  ASANA_GET_MULTIPLE_PROJECTS: () => ({ data: [{ gid: "77", name: "Launch" }] }),
+  ASANA_GET_SECTIONS_IN_PROJECT: () => ({ data: [{ gid: "5", name: "Today" }] }),
+};
 const created = (extra: object = {}) => () => ({
   data: { gid: "42", name: "Call Eric", assignee_section: { name: "Recently assigned" }, ...extra },
 });
 
 test("creates the task for me in the first workspace, with due time in UTC and the project", async () => {
-  const { execute, calls } = fakeComposio({ ...WORKSPACES, ASANA_CREATE_A_TASK: created({ due_at: "x" }) });
+  const { execute, calls } = fakeComposio({ ...LISTS, ASANA_CREATE_A_TASK: created({ due_at: "x" }) });
   await createAsana(execute).createTask({ name: "Call Eric", due_on: "2026-10-31", due_time: "9:00", project: "77" });
 
   expect(calls.find((c) => c.slug === "ASANA_CREATE_A_TASK")?.args).toEqual({
@@ -31,7 +38,7 @@ test("creates the task for me in the first workspace, with due time in UTC and t
 
 test("moves the task into the chosen section and reports that section's name", async () => {
   const { execute, calls } = fakeComposio({
-    ...WORKSPACES,
+    ...LISTS,
     ASANA_CREATE_A_TASK: created(),
     ASANA_ADD_TASK_TO_SECTION: () => ({ data: {} }),
   });
@@ -48,7 +55,7 @@ test("moves the task into the chosen section and reports that section's name", a
 
 test("a failed section move still returns the created task, with a warning", async () => {
   const { execute } = fakeComposio({
-    ...WORKSPACES,
+    ...LISTS,
     ASANA_CREATE_A_TASK: created(),
     ASANA_ADD_TASK_TO_SECTION: () => {
       throw new Error("section not found");
@@ -94,4 +101,22 @@ test("listOptions returns projects and the sections of the user's My Tasks list"
     projects: [{ gid: "77", name: "Launch" }],
     sections: [{ gid: "5", name: "Today" }],
   });
+});
+
+test("notes are sent when given and left out when blank", async () => {
+  const withNotes = fakeComposio({ ...WORKSPACES, ASANA_CREATE_A_TASK: created() });
+  await createAsana(withNotes.execute).createTask({ name: "Call Eric", notes: "  Bring the Q4 numbers " });
+  expect(withNotes.calls.find((c) => c.slug === "ASANA_CREATE_A_TASK")?.args.data.notes).toBe("Bring the Q4 numbers");
+
+  const blank = fakeComposio({ ...WORKSPACES, ASANA_CREATE_A_TASK: created() });
+  await createAsana(blank.execute).createTask({ name: "Call Eric", notes: "  " });
+  expect(blank.calls.find((c) => c.slug === "ASANA_CREATE_A_TASK")?.args.data).not.toHaveProperty("notes");
+});
+
+test("a project the card labeled wrongly is refused before the task is created", async () => {
+  const { execute, calls } = fakeComposio({ ...LISTS, ASANA_CREATE_A_TASK: created() });
+  const result = createAsana(execute).createTask({ name: "Call Eric", project: "77", project_choices: [{ gid: "77", name: "Personal" }] });
+  expect(result).rejects.toThrow(`The card showed project "Personal", but it is "Launch".`);
+  await result.catch(() => {});
+  expect(calls.map((c) => c.slug)).not.toContain("ASANA_CREATE_A_TASK");
 });

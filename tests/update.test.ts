@@ -24,6 +24,12 @@ function fakeAsana(fail: Record<string, string> = {}) {
     if (fail[slug]) throw new Error(fail[slug]);
     switch (slug) {
       case "ASANA_GET_A_TASK": return { data: structuredClone(state) };
+      // Real lists the server verifies the card's picks against.
+      case "ASANA_GET_MULTIPLE_WORKSPACES": return { data: [{ gid: "w", name: "W" }] };
+      case "ASANA_GET_A_USER_TASK_LIST": return { data: { gid: "ml", owner: { gid: "me1" } } };
+      case "ASANA_GET_MULTIPLE_PROJECTS": return { data: [{ gid: "p1", name: "Launch" }, { gid: "p2", name: "Personal" }] };
+      case "ASANA_GET_SECTIONS_IN_PROJECT": return { data: [{ gid: "s1", name: "Recently assigned" }, { gid: "s2", name: "Today" }] };
+      case "ASANA_GET_USERS_FOR_WORKSPACE": return { data: [{ gid: "me1", name: "Yue" }, { gid: "u9", name: "Sam" }] };
       case "ASANA_UPDATE_A_TASK":
         state = { ...state, ...args.data, assignee: "assignee" in args.data ? (args.data.assignee ? { gid: args.data.assignee, name: "Someone" } : null) : state.assignee };
         return { data: {} };
@@ -33,7 +39,7 @@ function fakeAsana(fail: Record<string, string> = {}) {
     }
     throw new Error(`unexpected ${slug}`);
   };
-  const writes = () => calls.filter((c) => c.slug !== "ASANA_GET_A_TASK");
+  const writes = () => calls.filter((c) => !c.slug.startsWith("ASANA_GET_"));
   return { execute, calls, writes };
 }
 
@@ -154,4 +160,24 @@ test("findTasks ranks exact, prefix, substring and all-words matches and returns
     assignee: "me1", project: "p1", section: "s1",
   });
   expect(found.assignee_choices).toEqual([{ gid: "me1", name: "Yue" }]);
+});
+
+test("a task that isn't assigned to the user is refused before any write", async () => {
+  const fake = fakeAsana();
+  const asana = createAsana(async (slug, args) =>
+    slug === "ASANA_GET_A_TASK" ? { data: { ...LIVE, assignee: { gid: "someone-else" } } } : fake.execute(slug, args));
+  expect(asana.updateTask({ task_gid: "42", name: "Renamed" })).rejects.toThrow("isn't assigned to you");
+  expect(fake.writes()).toEqual([]);
+});
+
+test("a pick the card labeled wrongly is refused before any write", async () => {
+  const fake = fakeAsana();
+  // The card labeled p2 "Launch", but p2 is really "Personal".
+  const mislabeled = update(fake, { name: "Renamed", project: "p2", project_choices: [{ gid: "p2", name: "Launch" }] });
+  expect(mislabeled).rejects.toThrow(`The card showed project "Launch", but it is "Personal". Nothing was changed.`);
+  await mislabeled.catch(() => {});
+  expect(fake.writes()).toEqual([]);
+
+  const unknown = fakeAsana();
+  expect(update(unknown, { assignee: "u404" })).rejects.toThrow("There is no assignee u404");
 });

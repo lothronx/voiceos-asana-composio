@@ -233,11 +233,13 @@ export type Choice = { gid: string; name: string };
 /** create_task's arguments. "" means the user cleared that field on the confirmation card. */
 export interface NewTask {
   name: string;
+  notes?: string;
   due_on?: string;
   due_time?: string;
   project?: string;
   section?: string;
-  /** Lets the result show the section's name without another API call. */
+  /** What the confirmation card listed: verified before writing, and lets the result show the section's name. */
+  project_choices?: Choice[];
   section_choices?: Choice[];
 }
 
@@ -270,10 +272,14 @@ export interface TaskUpdate {
   assignee?: string;
   project?: string;
   section?: string;
+  /** What the confirmation card listed (labels come from the agent, so they are verified before writing). */
+  project_choices?: Choice[];
+  section_choices?: Choice[];
+  assignee_choices?: Choice[];
 }
 
 /** A find_asana_tasks match: the task's current values, already shaped as update_task arguments. */
-export type TaskMatch = Required<TaskUpdate>;
+export type TaskMatch = Required<Omit<TaskUpdate, "project_choices" | "section_choices" | "assignee_choices">>;
 
 export interface UpdateResult {
   task: CreatedTask & { assignee: string };
@@ -308,13 +314,30 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   }
 
   // My Tasks is a project-like list; its sections are user-defined (and named in the user's language).
-  let myTasksCache: string | undefined;
-  async function myTasksList(): Promise<string> {
+  // Its owner is the signed-in Asana user ("me").
+  let myTasksCache: { gid: string; owner: string } | undefined;
+  async function myTasks(): Promise<{ gid: string; owner: string }> {
     if (myTasksCache) return myTasksCache;
     const workspace = await resolveWorkspace();
-    const gid = (await execute("ASANA_GET_A_USER_TASK_LIST", { user_task_list_gid: "me", workspace: workspace.gid }))?.data?.gid;
-    if (!gid) throw new Error("Could not find your My Tasks list in Asana.");
-    return (myTasksCache = String(gid));
+    const list = (await execute("ASANA_GET_A_USER_TASK_LIST", { user_task_list_gid: "me", workspace: workspace.gid }))?.data;
+    if (!list?.gid) throw new Error("Could not find your My Tasks list in Asana.");
+    return (myTasksCache = { gid: String(list.gid), owner: String(list.owner?.gid ?? "") });
+  }
+  const myTasksList = async () => (await myTasks()).gid;
+
+  /**
+   * Guards against a mislabeled confirmation card. Every label on the card
+   * comes from the agent's arguments, so before writing, a picked gid must
+   * exist in Asana and the label the card showed for it must be its real name.
+   */
+  function verifyPick(kind: string, gid: string | undefined, shown: Choice[] | undefined, real: Choice[]): void {
+    if (!gid) return;
+    const actual = real.find((c) => c.gid === gid);
+    if (!actual) throw new Error(`There is no ${kind} ${gid} in your Asana. Nothing was changed.`);
+    const label = shown?.find((c) => c.gid === gid)?.name;
+    if (label !== undefined && label !== actual.name) {
+      throw new Error(`The card showed ${kind} "${label}", but it is "${actual.name}". Nothing was changed.`);
+    }
   }
 
   /** The projects and My Tasks sections the confirmation cards offer as choices. */
@@ -333,6 +356,11 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     const workspace = await resolveWorkspace();
     const project = input.project?.trim();
     const section = input.section?.trim();
+    if (project || section) {
+      const real = await listOptions();
+      verifyPick("project", project, input.project_choices, real.projects);
+      verifyPick("section", section, input.section_choices, real.sections);
+    }
 
     const data: Record<string, unknown> = {
       name: input.name,
@@ -341,6 +369,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
       ...dueFields(input.due_on?.trim(), input.due_time?.trim()),
     };
     if (project) data.projects = [project];
+    const notes = input.notes?.trim();
+    if (notes) data.notes = notes;
 
     const raw = (await execute("ASANA_CREATE_A_TASK", { data }))?.data ?? {};
     if (!raw.gid) throw new Error("Asana returned no task ID — the task may not have been created.");
@@ -421,6 +451,26 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     };
   }
 
+  /** verifyPick for the list fields an update actually changes (fetches the real lists only when needed). */
+  async function verifyUpdatePicks(input: TaskUpdate, live: any): Promise<void> {
+    const project = input.project?.trim();
+    const section = input.section?.trim();
+    const assignee = input.assignee?.trim();
+    const projectChanges = !!project && project !== (live.projects?.[0]?.gid ?? "");
+    const sectionChanges = !!section && section !== (live.assignee_section?.gid ?? "");
+    const assigneeChanges = !!assignee && assignee !== (live.assignee?.gid ?? "");
+    if (projectChanges || sectionChanges) {
+      const real = await listOptions();
+      if (projectChanges) verifyPick("project", project, input.project_choices, real.projects);
+      if (sectionChanges) verifyPick("section", section, input.section_choices, real.sections);
+    }
+    if (assigneeChanges) {
+      const workspace = await resolveWorkspace();
+      const users = toChoices((await execute("ASANA_GET_USERS_FOR_WORKSPACE", { workspace_gid: workspace.gid, opt_fields: ["name"] }))?.data);
+      verifyPick("assignee", assignee, input.assignee_choices, users);
+    }
+  }
+
   /**
    * Applies only what differs from the task's live state: one update call for
    * name / description / due / assignee, then project and section moves (which
@@ -431,6 +481,11 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     const read = async () => (await execute("ASANA_GET_A_TASK", { task_gid, opt_fields: TASK_FIELDS }))?.data ?? {};
     const live = await read();
     if (!live.gid) throw new Error("Asana returned no task for that ID.");
+    // Scope: only tasks in the user's own My Tasks (the card can't prove which task it shows).
+    if (live.assignee?.gid !== (await myTasks()).owner) {
+      throw new Error("That task isn't assigned to you, so it can't be updated from My Tasks. Nothing was changed.");
+    }
+    await verifyUpdatePicks(input, live);
 
     const changed: string[] = [];
     const data: Record<string, unknown> = {};
@@ -846,9 +901,10 @@ async function main(): Promise<void> {
     "create_task",
     {
       title: "Create task",
-      description: "Create a new task assigned to the user in Asana My Tasks via Composio. Use when the user asks to create, add, or schedule a task or todo in Asana. First call list_asana_options and pass its projects and sections as project_choices and section_choices so the user can pick them on the confirmation card. Set project / section only when the user named one, using its gid.",
+      description: "Create a new task assigned to the user in Asana My Tasks via Composio. Use when the user asks to create, add, or schedule a task or todo in Asana. First call list_asana_options and pass its projects and sections as project_choices and section_choices so the user can pick them on the confirmation card. Set project / section only when the user named one, using its gid. Put any details the user gave beyond the title (notes, context, links) in notes.",
       inputSchema: {
         name: z.string().describe("Task name or title"),
+        notes: z.string().optional().describe("Optional task description"),
         due_on: z.string().optional().describe("Optional due date, YYYY-MM-DD"),
         due_time: z.string().optional().describe("Optional due time in the user's local time, 24h HH:MM; requires due_on"),
         project: z.string().optional().describe("Optional project gid from list_asana_options"),

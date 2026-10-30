@@ -26,6 +26,9 @@ const calIcon = `<svg class="as-ic" width="13" height="13" viewBox="0 0 14 14" f
 const header = (chip: string) => `<div class="as-head">${markHtml()}<span class="as-chip">${chip}</span></div>
 <input class="as-title" data-voiceos-key="name" placeholder="Task name" spellcheck="false" autocomplete="off" />`;
 
+/** The description, a quiet two-line field under the title (bound to `notes`). */
+const notesField = `<textarea class="as-notes" data-voiceos-key="notes" rows="2" placeholder="Add a description" spellcheck="false"></textarea>`;
+
 /** Due date + time on one row (70/30), with the calendar and time-list popovers. */
 const dueRow = `
 <input type="hidden" id="as-due_on" data-voiceos-key="due_on" />
@@ -52,14 +55,15 @@ const page = (rows: string) => `<div class="as">\n${rows}\n</div>`;
 const cards: Record<string, { markup: string; height: number }> = {
   create_task: {
     markup: page(`${header("New task")}
+${notesField}
 ${dueRow}
 ${menuRow("project", "Project", "No project")}
 ${menuRow("section", "Section", "Default section")}`),
-    height: 236,
+    height: 280,
   },
   update_task: {
     markup: page(`${header("Update task")}
-<textarea class="as-notes" data-voiceos-key="notes" rows="2" placeholder="Add a description" spellcheck="false"></textarea>
+${notesField}
 ${dueRow}
 ${menuRow("assignee", "Assignee", "Unassigned")}
 ${menuRow("project", "Project", "No project")}
