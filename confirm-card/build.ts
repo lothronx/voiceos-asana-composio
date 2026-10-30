@@ -1,10 +1,12 @@
 /**
- * Builds the confirmation cards of create_task and update_task and writes
- * them into voiceos.integration.json (tools[name].confirmation.root):
+ * Builds the confirmation cards (create_task, update_task, add_comment,
+ * complete_task) and writes them into voiceos.integration.json
+ * (tools[name].confirmation.root):
  *
  *   card.css   how they look
- *   card.js    how they behave (date/time pickers, list fields) — shared
- *   build.ts   the markup (this file); widgetKit wraps all three into one page
+ *   card.js    the task editors' behaviour (date/time pickers, list fields)
+ *   build.ts   the markup (this file), plus a tiny script for the simple cards;
+ *              widgetKit wraps markup, CSS and script into one page
  *
  * Run `bun confirm-card/build.ts` after editing any of them. VoiceOS caches the
  * manifest at install time, so the integration must be refreshed afterwards.
@@ -52,7 +54,23 @@ const menuRow = (key: string, label: string, none: string) => `
 
 const page = (rows: string) => `<div class="as">\n${rows}\n</div>`;
 
-const cards: Record<string, { markup: string; height: number }> = {
+/**
+ * For the simple cards: shows the task the action targets (read-only — the
+ * server re-checks it) and, on complete_task, whether it completes or reopens.
+ * Runs before the kit's bridge, which then fills the editable [data-voiceos-key] fields.
+ */
+const SIMPLE_SCRIPT = `(function(){
+  addEventListener('message', function (e) {
+    if (e.source !== parent || !e.data || e.data.type !== 'voiceos:init') return;
+    var a = e.data.args || {};
+    document.querySelectorAll('[data-arg]').forEach(function (el) { el.textContent = a[el.getAttribute('data-arg')] || ''; });
+    if (a.completed === false) document.querySelectorAll('[data-reopen]').forEach(function (el) { el.textContent = el.getAttribute('data-reopen'); });
+  });
+})();`;
+
+const ringIcon = `<span class="as-target-ring" aria-hidden="true"></span>`;
+
+const cards: Record<string, { markup: string; height: number; script?: string }> = {
   create_task: {
     markup: page(`${header("New task")}
 ${notesField}
@@ -70,15 +88,29 @@ ${menuRow("project", "Project", "No project")}
 ${menuRow("section", "Section", "Keep section")}`),
     height: 310,
   },
+  add_comment: {
+    markup: page(`<div class="as-head">${markHtml()}<span class="as-chip">Add comment</span></div>
+<div class="as-target"><span class="as-lbl">On</span><span class="as-target-name" data-arg="task_name"></span></div>
+<textarea class="as-comment" data-voiceos-key="text" rows="3" placeholder="Write a comment" spellcheck="true"></textarea>`),
+    height: 190,
+    script: SIMPLE_SCRIPT,
+  },
+  complete_task: {
+    markup: page(`<div class="as-head">${markHtml()}<span class="as-chip" data-reopen="Reopen task">Complete task</span></div>
+<div class="as-target">${ringIcon}<span class="as-target-name" data-arg="task_name"></span></div>
+<div class="as-note" data-reopen="It will be marked incomplete again in Asana.">It will be marked complete in Asana.</div>`),
+    height: 150,
+    script: SIMPLE_SCRIPT,
+  },
 };
 
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-for (const [name, { markup, height }] of Object.entries(cards)) {
+for (const [name, { markup, height, script }] of Object.entries(cards)) {
   // The card script must run before widgetKit's bridge script, which renderCustom appends after the body.
   const card = renderCustom({
     accent: "#f06a6a",
     css: read("card.css"),
-    body: `${markup}\n<script>${read("card.js")}</script>`,
+    body: `${markup}\n<script>${script ?? read("card.js")}</script>`,
     mode: "confirm",
     height,
   });

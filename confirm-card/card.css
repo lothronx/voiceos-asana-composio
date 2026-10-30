@@ -120,6 +120,20 @@ html[data-k-theme=light] .as-pop { box-shadow: 0 0 0 1px var(--line), 0 12px 28p
 .as-grid > button.as-today { color: var(--accent); font-weight: 600; }
 .as-grid > button[aria-pressed=true] { background: var(--accent); color: #fff; }
 
+/* ---- Simple cards (add_comment, complete_task): the target task, read-only ---- */
+.as-target { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+.as-target .as-lbl { width: auto; }
+.as-target-name { flex: 1; min-width: 0; font-size: 16px; font-weight: 600; line-height: 1.3; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-target-ring { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 1.6px solid var(--accent); box-sizing: border-box; }
+.as-note { font-size: 12.5px; color: var(--ink-3); }
+.as-comment {
+  display: block; width: 100%; box-sizing: border-box; padding: 8px 10px; resize: none;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--fill-1); outline: none;
+  color: var(--ink-1); font: inherit; font-size: 13px; line-height: 1.45;
+}
+.as-comment:focus { border-color: var(--accent); }
+.as-comment::placeholder { color: var(--ink-4); }
+
 /* ---- Accessibility ---- */
 .as button:focus-visible, .as-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .as-title:focus-visible { outline: none; border-bottom-width: 3px; }

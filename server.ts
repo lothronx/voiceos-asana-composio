@@ -1,7 +1,7 @@
 /**
  * Asana Tasks — the MCP server VoiceOS launches via run.sh (stdio; stdout is
  * the MCP wire, so log with console.error). Tools: create_task,
- * update_task, search_tasks and get_task, plus the agent-only helpers
+ * update_task, search_tasks, get_task, add_comment and complete_task, plus the agent-only helpers
  * list_asana_options and find_asana_tasks that feed the confirmation cards.
  *
  * Why one file: VoiceOS "Publish" ships only server.ts, widgetKit.ts,
@@ -32,6 +32,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -371,6 +372,23 @@ export interface TaskDetails {
   /** Newest last. */
   comments: { author: string; text: string; created_at: string }[];
   permalink_url: string;
+}
+
+/** add_comment's and complete_task's arguments; `task_name` is what the card showed (verified). */
+export interface TaskRef {
+  task_gid: string;
+  task_name?: string;
+}
+
+export interface CommentResult {
+  task: { gid: string; name: string; permalink_url: string };
+  comment: { author: string; text: string; created_at: string };
+}
+
+export interface CompleteResult {
+  task: CreatedTask & { completed: boolean };
+  /** False when the task already was in the wanted state (nothing written). */
+  changed: boolean;
 }
 
 /** Fields requested for search hits. */
@@ -778,7 +796,72 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
     };
   }
 
-  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask, searchTasks, getTask };
+  /**
+   * Reads a task for a write that the user approved on a card. The card's
+   * task name comes from the agent, so it must match the real one.
+   */
+  async function readForWrite(ref: TaskRef): Promise<any> {
+    const task_gid = ref.task_gid.trim();
+    const live = (await execute("ASANA_GET_A_TASK", { task_gid, opt_fields: [...TASK_FIELDS, "completed"] }))?.data;
+    if (!live?.gid) throw new Error("Asana returned no task for that ID.");
+    // Fail closed: a card that didn't name the task asked the user to approve blind.
+    const shown = ref.task_name?.trim();
+    if (!shown) throw new Error("The card didn't say which task this is. Nothing was changed.");
+    if (shown.toLowerCase() !== String(live.name ?? "").trim().toLowerCase()) {
+      throw new Error(`The card showed task "${shown}", but that task is "${live.name}". Nothing was changed.`);
+    }
+    return live;
+  }
+
+  /** Posts a plain-text comment on any task the user can see. */
+  async function addComment(input: TaskRef & { text: string }): Promise<CommentResult> {
+    const text = input.text?.trim();
+    if (!text) throw new Error("The comment is empty. Nothing was posted.");
+    const live = await readForWrite(input);
+    const res = await execute("ASANA_CREATE_TASK_COMMENT", { task_id: String(live.gid), text });
+    const story = res?.data ?? res; // this tool returns the story itself, not wrapped in data
+    return {
+      task: { gid: String(live.gid), name: String(live.name ?? ""), permalink_url: live.permalink_url || `https://app.asana.com/0/0/${live.gid}` },
+      comment: { author: String(story?.created_by?.name ?? ""), text: String(story?.text ?? text), created_at: String(story?.created_at ?? "") },
+    };
+  }
+
+  const completeResult = (t: any, completed: boolean, changed: boolean): CompleteResult => {
+    const due = localDue(t);
+    return {
+      task: {
+        gid: String(t.gid),
+        name: String(t.name ?? ""),
+        section: String(t.assignee_section?.name || "My Tasks"),
+        project: t.projects?.[0]?.name ? String(t.projects[0].name) : "",
+        due: [due.due_on, due.due_time].filter(Boolean).join(" "),
+        permalink_url: t.permalink_url || `https://app.asana.com/0/0/${t.gid}`,
+        completed,
+      },
+      changed,
+    };
+  };
+
+  /** Completes (or, with completed: false, reopens) any task the user can see; voice path, name-checked. */
+  async function setCompleted(input: TaskRef & { completed?: boolean }): Promise<CompleteResult> {
+    const completed = input.completed !== false;
+    const live = await readForWrite(input);
+    const changed = !!live.completed !== completed;
+    if (changed) await execute("ASANA_UPDATE_A_TASK", { task_gid: String(live.gid), data: { completed } });
+    return completeResult(live, completed, changed);
+  }
+
+  /**
+   * The card circle's path: the caller already proved (card token) that the
+   * user saw this task, so one write that returns the task replaces read + write.
+   */
+  async function completeFromCard(task_gid: string, completed: boolean): Promise<CompleteResult> {
+    const t = (await execute("ASANA_UPDATE_A_TASK", { task_gid, data: { completed }, opt_fields: [...TASK_FIELDS, "completed"] }))?.data;
+    if (!t?.gid) throw new Error("Asana returned no task for that ID.");
+    return completeResult(t, !!t.completed, true);
+  }
+
+  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask, searchTasks, getTask, addComment, setCompleted, completeFromCard };
 }
 
 // ============================================================================
@@ -984,6 +1067,10 @@ html[data-k-theme=light] .as-pill{
   text-overflow:ellipsis;
   white-space:nowrap;
 }
+.as-trow.as-done .as-title{
+  color:var(--ink-3);
+  text-decoration:line-through;
+}
 .as-row.as-done .as-row-name{
   color:var(--ink-3);
   text-decoration:line-through;
@@ -993,6 +1080,22 @@ html[data-k-theme=light] .as-pill{
   font-size:11px;
   color:var(--ink-3);
   font-variant-numeric:tabular-nums;
+}
+.as-ringbtn{
+  flex:none;
+  display:grid;
+  place-items:center;
+  width:22px;
+  height:22px;
+  margin:-5px;
+  padding:0;
+  border:0;
+  border-radius:50%;
+  background:transparent;
+  cursor:pointer;
+}
+.as-ringbtn:hover .as-dotring{
+  border-color:var(--accent);
 }
 .as-dotring{
   flex:none;
@@ -1061,7 +1164,7 @@ export function successCard(
       </div>
       <div class="as-card">
         <div class="as-trow">
-          <div class="as-ring">${CHECK_ICON}</div>
+          <div class="as-ring">${(task as { completed?: boolean }).completed === false ? `<span class="as-dotring"></span>` : CHECK_ICON}</div>
           <div class="as-title">${esc(clip(task.name, 90))}</div>
         </div>
       </div>
@@ -1077,11 +1180,14 @@ export function successCard(
 }
 
 /**
- * Opens a search row in place: asks get_task (uiCallable) for the details and
- * renders them under the row. Without the host's tool bridge (older hosts) a
- * row opens the task in Asana instead.
+ * Behaviour of the search and task-details cards (needs the host's tool
+ * bridge; older hosts fall back to opening the task in Asana):
+ *  - the circle before a task completes it, or reopens a completed one,
+ *    by calling set_task_done with the row's card token (no approval dialog);
+ *    the card flips at once and rolls back if the write fails;
+ *  - a search row opens in place with get_task's details.
  */
-const LIST_CARD_SCRIPT = `(function(){
+const CARD_SCRIPT = `(function(){
   var cache = {}, busy = false;
   /* The host returns the tool's MCP result; be lenient about its exact shape. */
   function payload(m) {
@@ -1090,11 +1196,21 @@ const LIST_CARD_SCRIPT = `(function(){
     if (typeof r === 'string') { try { return JSON.parse(r); } catch (e) { return { error: r }; } }
     return r || {};
   }
+  function outcome(m) {
+    return m.status === 'completed' ? payload(m) : { error: m.error || ('Not done (' + m.status + ').') };
+  }
   function line(parent, cls, text) {
     if (!text) return;
     var d = document.createElement('div'); d.className = cls; d.textContent = text; parent.appendChild(d);
   }
-  function details(row, data) {
+  function note(after, text) {
+    var x = document.createElement('div'); x.className = 'as-x'; line(x, 'as-x-dim', text);
+    after.parentNode.insertBefore(x, after.nextSibling);
+  }
+  function canCall() { return window.voiceos && window.voiceos.canInvokeTools; }
+  function openInAsana(el) { parent.postMessage({ type: 'voiceos:openUrl', url: el.getAttribute('data-url') }, '*'); }
+
+  function details(data) {
     var x = document.createElement('div'); x.className = 'as-x';
     var t = data && data.task;
     if (!t) { line(x, 'as-x-dim', (data && data.error) || 'No details came back.'); return x; }
@@ -1111,25 +1227,57 @@ const LIST_CARD_SCRIPT = `(function(){
     return x;
   }
   function toggle(row, panel) {
-    var open = row.nextElementSibling && row.nextElementSibling.classList.contains('as-x');
-    if (open) { row.parentNode.removeChild(row.nextElementSibling); row.setAttribute('aria-expanded', 'false'); return; }
+    var next = row.nextElementSibling;
+    if (next && next.classList.contains('as-x')) { next.parentNode.removeChild(next); row.setAttribute('aria-expanded', 'false'); return; }
     row.parentNode.insertBefore(panel, row.nextSibling); row.setAttribute('aria-expanded', 'true');
   }
-  document.addEventListener('click', function (e) {
-    var row = e.target && e.target.closest && e.target.closest('.as-row[data-gid]');
-    if (!row) return;
-    var v = window.voiceos;
-    if (!v || !v.canInvokeTools) { parent.postMessage({ type: 'voiceos:openUrl', url: row.getAttribute('data-url') }, '*'); return; }
-    var gid = row.getAttribute('data-gid');
-    if (cache[gid]) { toggle(row, details(row, cache[gid])); return; }
+
+  /* The circle: [data-task] is the row or the details title; .as-done marks a completed task. */
+  function show(box, completed) {
+    box.classList.toggle('as-done', completed);
+    var status = document.querySelector('.as-status');
+    if (status) { status.textContent = completed ? 'Completed' : 'Open'; status.classList.toggle('as-success', completed); }
+    /* Red only while an overdue task is open. */
+    var due = (box.classList.contains('as-row') ? box : document).querySelector('[data-overdue]');
+    if (due) due.classList.toggle('as-late', !completed);
+  }
+  function complete(btn) {
+    var box = btn.closest('[data-task]');
+    if (!canCall()) { openInAsana(box); return; }
     if (busy) return; /* the host allows one pending action per card */
+    busy = true;
+    var was = box.classList.contains('as-done');
+    show(box, !was); /* optimistic: the click shows at once; the write follows */
+    window.voiceos.invokeTool('set_task_done', {
+      task_gid: box.getAttribute('data-gid'), task_name: box.getAttribute('data-name'),
+      completed: !was, card_token: box.getAttribute('data-token'),
+    })
+      .then(function (m) {
+        var data = outcome(m);
+        if (data && data.task) { show(box, !!data.task.completed); delete cache[box.getAttribute('data-gid')]; return; }
+        show(box, was); /* undo the optimistic change */
+        if (m.status !== 'cancelled') note(box.closest('.as-card') || box, (data && data.error) || 'Could not update the task.');
+      })
+      .finally(function () { busy = false; });
+  }
+
+  document.addEventListener('click', function (e) {
+    var t = e.target; if (!t || !t.closest) return;
+    var ring = t.closest('.as-ringbtn');
+    if (ring) { complete(ring); return; }
+    var row = t.closest('.as-row[data-gid]');
+    if (!row) return;
+    if (!canCall()) { openInAsana(row); return; }
+    var gid = row.getAttribute('data-gid');
+    if (cache[gid]) { toggle(row, details(cache[gid])); return; }
+    if (busy) return;
     busy = true;
     var due = row.querySelector('.as-row-due'), before = due ? due.textContent : '';
     if (due) due.textContent = 'Loading…'; else row.insertAdjacentHTML('beforeend', '<span class="as-row-due">Loading…</span>');
-    v.invokeTool('get_task', { task_gid: gid }).then(function (m) {
-      var data = m.status === 'completed' ? payload(m) : { error: m.error || ('Could not load details (' + m.status + ').') };
-      if (m.status === 'completed' && data.task) cache[gid] = data;
-      toggle(row, details(row, data));
+    window.voiceos.invokeTool('get_task', { task_gid: gid }).then(function (m) {
+      var data = outcome(m);
+      if (data.task) cache[gid] = data;
+      toggle(row, details(data));
     }).finally(function () {
       busy = false;
       var d = row.querySelector('.as-row-due');
@@ -1141,15 +1289,36 @@ const LIST_CARD_SCRIPT = `(function(){
   });
 })();`;
 
+/**
+ * The circle completes a task without a confirmation dialog (the click is the
+ * user's intent; VoiceOS can only show raw JSON for card-initiated approvals).
+ * So that the agent can't use that unconfirmed path, each task row carries a
+ * token signed with a per-process secret; set_task_done refuses anything else.
+ * A server restart makes older cards' circles ask the user to search again.
+ */
+const CARD_SECRET = randomBytes(32);
+export function cardToken(taskGid: string): string {
+  return createHmac("sha256", CARD_SECRET).update(taskGid).digest("hex");
+}
+export function isCardToken(taskGid: string, token: unknown): boolean {
+  const want = Buffer.from(cardToken(taskGid));
+  const got = Buffer.from(typeof token === "string" ? token : "");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/** The clickable circle that completes / reopens a task (see CARD_SCRIPT). */
+const ringButton = (completed: boolean) =>
+  `<button type="button" class="as-ringbtn" aria-label="${completed ? "Reopen task" : "Complete task"}"><span class="as-dotring"></span></button>`;
+
 /** search_tasks' result (also get_task's "which one?" when several match): every hit, scrollable, each row opens in place. */
 export function taskListCard(title: string, { tasks, total, note }: SearchResult): RenderedWidget {
   const rows = tasks.map((t) => {
     const due = friendlyDue(t.due);
     return `
-        <div class="as-row${t.completed ? " as-done" : ""}" role="button" tabindex="0" aria-expanded="false" data-gid="${esc(t.gid)}" data-url="${esc(t.permalink_url)}">
-          <span class="as-dotring"></span>
+        <div class="as-row${t.completed ? " as-done" : ""}" role="button" tabindex="0" aria-expanded="false" data-task data-gid="${esc(t.gid)}" data-name="${esc(t.name)}" data-token="${cardToken(t.gid)}" data-url="${esc(t.permalink_url)}">
+          ${ringButton(t.completed)}
           <span class="as-row-name">${esc(clip(t.name, 60))}</span>
-          ${due ? `<span class="as-row-due${isOverdue(t.due, t.completed) ? " as-late" : ""}">${esc(due)}</span>` : ""}
+          ${due ? `<span class="as-row-due${isOverdue(t.due, t.completed) ? " as-late" : ""}"${isOverdue(t.due, false) ? " data-overdue" : ""}>${esc(due)}</span>` : ""}
         </div>`;
   }).join("");
   const more = total - tasks.length;
@@ -1164,7 +1333,7 @@ export function taskListCard(title: string, { tasks, total, note }: SearchResult
       ${more > 0 ? `<div class="as-foot">+${more} more — narrow the search to see them</div>` : ""}
       ${note ? `<div class="as-foot">${esc(note)}</div>` : ""}
     </div>
-    <script>${LIST_CARD_SCRIPT}</script>
+    <script>${CARD_SCRIPT}</script>
   `;
   const listHeight = Math.min(300, 29 * tasks.length);
   return renderCustom({ accent: ACCENT, css: CSS, body, height: Math.min(420, 52 + listHeight + (more > 0 ? 22 : 0) + (note ? 22 : 0)) });
@@ -1175,7 +1344,7 @@ export function taskDetailsCard(task: TaskDetails): RenderedWidget {
   const done = task.subtasks.filter((x) => x.completed).length;
   const comment = task.comments.at(-1);
   const pills = [
-    task.due ? `<div class="as-pill as-due${isOverdue(task.due, task.completed) ? " as-late" : ""}">${CALENDAR_ICON}<span>${esc(task.due_label)}</span></div>` : "",
+    task.due ? `<div class="as-pill as-due${isOverdue(task.due, task.completed) ? " as-late" : ""}"${isOverdue(task.due, false) ? " data-overdue" : ""}>${CALENDAR_ICON}<span>${esc(task.due_label)}</span></div>` : "",
     ...task.projects.slice(0, 1).map((p) => `<div class="as-pill">${esc(clip(p, 18))}</div>`),
     task.section ? `<div class="as-pill">${esc(clip(task.section, 14))}</div>` : "",
     `<div class="as-pill">${esc(clip(task.assignee || "Unassigned", 16))}</div>`,
@@ -1185,11 +1354,11 @@ export function taskDetailsCard(task: TaskDetails): RenderedWidget {
       <div class="as-head">
         ${markHtml()}
         <span class="as-chip">TASK</span>
-        <span class="as-tag ${task.completed ? "as-success" : ""}">${task.completed ? "Completed" : "Open"}</span>
+        <span class="as-tag as-status ${task.completed ? "as-success" : ""}">${task.completed ? "Completed" : "Open"}</span>
       </div>
       <div class="as-card">
-        <div class="as-trow">
-          <div class="as-ring">${task.completed ? CHECK_ICON : `<span class="as-dotring"></span>`}</div>
+        <div class="as-trow${task.completed ? " as-done" : ""}" data-task data-gid="${esc(task.gid)}" data-name="${esc(task.name)}" data-token="${cardToken(task.gid)}" data-url="${esc(task.permalink_url)}">
+          <div class="as-ring">${ringButton(task.completed)}</div>
           <div class="as-title">${esc(clip(task.name, 90))}</div>
         </div>
         ${task.notes ? `<div class="as-desc">${esc(clip(task.notes, 160))}</div>` : ""}
@@ -1201,11 +1370,33 @@ export function taskDetailsCard(task: TaskDetails): RenderedWidget {
         <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>
       </div>
     </div>
+    <script>${CARD_SCRIPT}</script>
   `;
   return renderCustom({
     accent: ACCENT, css: CSS, body,
     height: 135 + (task.notes ? 36 : 0) + (task.subtasks.length ? 22 : 0) + (comment ? 22 : 0),
   });
+}
+
+/** add_comment's result: the comment as posted, under the task it went on. */
+export function commentCard({ task, comment }: CommentResult): RenderedWidget {
+  const body = `
+    <div class="as">
+      <div class="as-head">
+        ${markHtml()}
+        <span class="as-chip">COMMENT</span>
+        <span class="as-tag as-success">Added</span>
+      </div>
+      <div class="as-card">
+        <div class="as-title">${esc(clip(task.name, 90))}</div>
+        <div class="as-desc" style="padding-left:0">${esc(clip(comment.text, 200))}</div>
+      </div>
+      <div class="as-meta">
+        <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>
+      </div>
+    </div>
+  `;
+  return renderCustom({ accent: ACCENT, css: CSS, body, height: 150 });
 }
 
 /** The card when a tool failed; the message is the same text the model gets. */
@@ -1471,6 +1662,79 @@ async function main(): Promise<void> {
         console.error("get_task failed:", err);
         const { error, reconnect } = await describeError(err, linkStatus, userId);
         return textResult({ error, reconnect, _voiceos_glance: glance(errorCard("Get task", error)) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "add_comment",
+    {
+      title: "Add comment",
+      description: "Add a comment to an Asana task. Use when the user asks to comment on a task, reply on it, or post an update or note for others on it. Get the task's gid and exact name from find_asana_tasks (the user's own open tasks) or search_tasks, and pass both plus the comment in the user's words.",
+      inputSchema: {
+        task_gid: z.string().describe("The task's gid from find_asana_tasks or search_tasks"),
+        task_name: z.string().describe("The task's exact name, shown on the confirmation card"),
+        text: z.string().describe("The comment, plain text"),
+      } as any,
+    },
+    async (args: TaskRef & { text: string }) => {
+      try {
+        const result = await asana.addComment(args);
+        return textResult({ success: true, ...result, _voiceos_glance: glance(commentCard(result)) });
+      } catch (err) {
+        console.error("add_comment failed:", err);
+        const { error, reconnect } = await describeError(err, linkStatus, userId);
+        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard(args.task_name || "Add comment", error)) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "complete_task",
+    {
+      title: "Complete task",
+      description: "Mark an Asana task complete, or reopen it with completed: false. Use when the user says a task is done or finished, asks to check it off, or asks to reopen or uncomplete it. Get the task's gid and exact name from find_asana_tasks (the user's own open tasks) or search_tasks, and pass both.",
+      inputSchema: {
+        task_gid: z.string().describe("The task's gid from find_asana_tasks or search_tasks"),
+        task_name: z.string().describe("The task's exact name, shown on the confirmation card"),
+        completed: z.boolean().optional().describe("true (default) completes the task, false reopens it"),
+      } as any,
+    },
+    async (args: TaskRef & { completed?: boolean }) => {
+      try {
+        const result = await asana.setCompleted(args);
+        const done = result.task.completed;
+        const status = result.changed ? (done ? "Completed" : "Reopened") : (done ? "Already completed" : "Already open");
+        return textResult({ success: true, ...result, _voiceos_glance: glance(successCard(result, { status })) });
+      } catch (err) {
+        console.error("complete_task failed:", err);
+        const { error, reconnect } = await describeError(err, linkStatus, userId);
+        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard(args.task_name || "Complete task", error)) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_task_done",
+    {
+      title: "Complete task from a card",
+      description: "Only for the circle on Asana task cards, after the user clicks it. Never call this yourself: to complete or reopen a task the user asked for, use complete_task.",
+      inputSchema: {
+        task_gid: z.string().describe("The task's gid"),
+        task_name: z.string().describe("The task's name as the card shows it"),
+        completed: z.boolean().describe("true completes the task, false reopens it"),
+        card_token: z.string().describe("The token the card was rendered with"),
+      } as any,
+    },
+    async (args: TaskRef & { completed: boolean; card_token: string }) => {
+      try {
+        if (!isCardToken(args.task_gid, args.card_token)) {
+          throw new Error("This card has expired. Search again to complete the task here, or say it to complete it.");
+        }
+        return textResult({ success: true, ...(await asana.completeFromCard(args.task_gid, args.completed !== false)) });
+      } catch (err) {
+        console.error("set_task_done failed:", err);
+        return textResult(await describeError(err, linkStatus, userId), true);
       }
     },
   );
