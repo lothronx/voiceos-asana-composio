@@ -27,6 +27,16 @@ html[data-k-theme=light] .as { --pop: #fff; }
 }
 .as-title::placeholder { color: var(--ink-4); }
 
+/* ---- Description (update card): a quiet two-line field under the title ---- */
+.as-notes {
+  display: block; width: 100%; box-sizing: border-box;
+  margin: -2px 0 8px; padding: 4px 0; border: 0; border-bottom: 1px solid transparent; outline: none; resize: none;
+  background: transparent; color: var(--ink-2);
+  font: inherit; font-size: 13px; line-height: 1.4;
+}
+.as-notes::placeholder { color: var(--ink-4); }
+.as-notes:focus { border-bottom-color: var(--line); }
+
 /* ---- Field rows: label on the left, a borderless value button on the right ---- */
 .as-row { display: flex; align-items: center; min-height: 32px; }
 .as-lbl { flex: none; width: 58px; font-size: 12px; color: var(--ink-3); }

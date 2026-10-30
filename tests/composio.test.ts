@@ -54,3 +54,32 @@ test("a missing API key fails before any network call", async () => {
   expect((await failure(c.request("GET", "/auth_configs"))).message).toContain("Missing Composio API key");
   expect(f.seen.url).toBeUndefined();
 });
+
+test("proxy looks up the user's ACTIVE account and sends user_id + connected_account_id with the raw body", async () => {
+  const sent: { url: string; body: any }[] = [];
+  const fetchFn = (async (url: string, init: RequestInit) => {
+    sent.push({ url, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    const body = url.includes("/connected_accounts") ? { items: [{ id: "ca_1" }] } : { status: 200, data: { data: { gid: "42" } } };
+    return new Response(JSON.stringify(body), { status: 200 });
+  }) as unknown as typeof fetch;
+  const { proxy } = createComposio({ apiKey: "ak", userId: "u1", fetch: fetchFn });
+
+  expect(await proxy("asana", "PUT", "https://app.asana.com/api/1.0/tasks/42", { data: { assignee: null } })).toEqual({ data: { gid: "42" } });
+  expect(sent[0].url).toBe("https://backend.composio.dev/api/v3.1/connected_accounts?toolkit_slugs=asana&user_ids=u1&statuses=ACTIVE");
+  expect(sent[1].body).toEqual({
+    endpoint: "https://app.asana.com/api/1.0/tasks/42", method: "PUT", body: { data: { assignee: null } },
+    user_id: "u1", connected_account_id: "ca_1",
+  });
+});
+
+test("proxy without an active account is a connection error; an app error status throws", async () => {
+  const none = createComposio({ apiKey: "ak", userId: "u1", fetch: (async () => new Response(JSON.stringify({ items: [] }))) as any });
+  expect(isConnectionError(await failure(none.proxy("asana", "PUT", "x")))).toBe(true);
+
+  const forbidden = createComposio({
+    apiKey: "ak", userId: "u1",
+    fetch: (async (url: string) => new Response(JSON.stringify(url.includes("connected_accounts") ? { items: [{ id: "ca" }] } : { status: 403, data: { errors: [{ message: "Forbidden" }] } }))) as any,
+  });
+  const err = await failure(forbidden.proxy("asana", "PUT", "x"));
+  expect(err.message).toBe("Forbidden");
+});

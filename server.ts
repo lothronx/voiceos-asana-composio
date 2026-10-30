@@ -1,7 +1,8 @@
 /**
  * Asana Tasks — the MCP server VoiceOS launches via run.sh (stdio; stdout is
- * the MCP wire, so log with console.error). Tools: create_task, plus the
- * agent-only helper list_asana_options that feeds the confirmation card.
+ * the MCP wire, so log with console.error). Tools: create_task and
+ * update_task, plus the agent-only helpers list_asana_options and
+ * find_asana_tasks that feed their confirmation cards.
  *
  * Why one file: VoiceOS "Publish" ships only server.ts, widgetKit.ts,
  * voiceos.integration.json, package.json and icon.png. Every runtime line
@@ -74,6 +75,7 @@ export function loadEnvFile(path: string): void {
 //   execute(slug, args)        runs one Composio tool (e.g. ASANA_CREATE_A_TASK)
 //                              for the connected user and returns its `data`
 //   request(method, path, b?)  plain REST call (e.g. listing connected accounts)
+//   proxy(toolkit, method, url, b?)  the app's own API via the connected account
 //
 // API v3.1: tools run at their latest version when `version` is omitted
 // (v3 would pin an old one). Knows nothing about Asana.
@@ -108,6 +110,13 @@ export type ExecuteTool = (slug: string, args: Record<string, unknown>) => Promi
 /** A REST call against the Composio API; resolves to the parsed JSON body. */
 export type ComposioRequest = (method: "GET" | "POST", path: string, body?: unknown) => Promise<any>;
 
+/**
+ * Calls an app's own REST API through Composio with the user's connected
+ * account. The body passes through untouched, so `null` survives — Composio's
+ * typed tools drop nulls, which makes some clears (e.g. unassigning) impossible.
+ */
+export type ProxyCall = (toolkit: string, method: "GET" | "POST" | "PUT" | "DELETE", url: string, body?: unknown) => Promise<any>;
+
 export interface ComposioConfig {
   /** Project API key (COMPOSIO_API_KEY: Setup field, else .env). Checked per call, so a missing key becomes a tool error, not a crash at startup. */
   apiKey?: string;
@@ -117,7 +126,7 @@ export interface ComposioConfig {
   fetch?: typeof fetch;
 }
 
-export function createComposio(config: ComposioConfig): { execute: ExecuteTool; request: ComposioRequest } {
+export function createComposio(config: ComposioConfig): { execute: ExecuteTool; request: ComposioRequest; proxy: ProxyCall } {
   const request: ComposioRequest = async (method, path, body) => {
     if (!config.apiKey) throw new ComposioError("Missing Composio API key — set COMPOSIO_API_KEY in this integration's .env (or, for testing, its Setup page).", "composio");
 
@@ -150,7 +159,23 @@ export function createComposio(config: ComposioConfig): { execute: ExecuteTool; 
     return json.data;
   };
 
-  return { execute, request };
+  const proxy: ProxyCall = async (toolkit, method, url, body) => {
+    // The proxy needs the connected account id, plus user_id when the project enforces 2FA.
+    const query = new URLSearchParams({ toolkit_slugs: toolkit, user_ids: config.userId, statuses: "ACTIVE" });
+    const accountId = (await request("GET", `/connected_accounts?${query}`))?.items?.[0]?.id;
+    if (!accountId) {
+      throw new ComposioError(`No active ${toolkit} connection for user ${config.userId}`, "composio", 404, "Proxy_ConnectedAccountNotFound");
+    }
+    const json = await request("POST", "/tools/execute/proxy", {
+      endpoint: url, method, body, user_id: config.userId, connected_account_id: accountId,
+    });
+    if (!json || !(json.status < 400)) {
+      throw new ComposioError(json?.data?.errors?.[0]?.message || `${toolkit} HTTP ${json?.status}`, "tool", json?.status);
+    }
+    return json.data;
+  };
+
+  return { execute, request, proxy };
 }
 
 /**
@@ -183,6 +208,16 @@ export function dueFields(due_on?: string, due_time?: string): { due_on?: string
     throw new Error(`"${due_on} ${due_time}" is not a real date and time.`);
   }
   return { due_at: at.toISOString() };
+}
+
+/** The reverse of dueFields: a task's due_on / due_at as local date and "HH:MM" (time "" when date-only). */
+export function localDue(raw: { due_on?: string | null; due_at?: string | null }): { due_on: string; due_time: string } {
+  if (raw.due_at) {
+    const d = new Date(raw.due_at);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return { due_on: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`, due_time: `${pad(d.getHours())}:${pad(d.getMinutes())}` };
+  }
+  return { due_on: raw.due_on ?? "", due_time: "" };
 }
 
 // ============================================================================
@@ -222,10 +257,42 @@ export interface CreateResult {
   warning?: string;
 }
 
+/**
+ * update_task's arguments. Absent = keep as is; "" = clear (due date,
+ * project, assignee); anything else = set. An empty name or section is ignored.
+ */
+export interface TaskUpdate {
+  task_gid: string;
+  name?: string;
+  notes?: string;
+  due_on?: string;
+  due_time?: string;
+  assignee?: string;
+  project?: string;
+  section?: string;
+}
+
+/** A find_asana_tasks match: the task's current values, already shaped as update_task arguments. */
+export type TaskMatch = Required<TaskUpdate>;
+
+export interface UpdateResult {
+  task: CreatedTask & { assignee: string };
+  /** Human names of the fields that actually changed, e.g. ["due date", "project"]; empty = nothing to do. */
+  changed: string[];
+  /** Set when the main update went through but moving project or section failed. */
+  warning?: string;
+}
+
+/** Fields requested from Asana when reading a task for find/update. */
+const TASK_FIELDS = [
+  "name", "notes", "due_on", "due_at", "permalink_url",
+  "assignee", "assignee.name", "assignee_section", "assignee_section.name", "projects", "projects.name",
+];
+
 const toChoices = (list: any[] | undefined): Choice[] =>
   (list ?? []).map((x) => ({ gid: String(x.gid), name: String(x.name) }));
 
-export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string } = {}) {
+export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string; proxy?: ProxyCall } = {}) {
   // Cached for the life of the server process, which VoiceOS restarts on reconnect.
   let workspaceCache: Choice | undefined;
 
@@ -240,19 +307,24 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string 
     return (workspaceCache = list[0]);
   }
 
-  /** The projects and My Tasks sections the confirmation card offers as choices. */
+  // My Tasks is a project-like list; its sections are user-defined (and named in the user's language).
+  let myTasksCache: string | undefined;
+  async function myTasksList(): Promise<string> {
+    if (myTasksCache) return myTasksCache;
+    const workspace = await resolveWorkspace();
+    const gid = (await execute("ASANA_GET_A_USER_TASK_LIST", { user_task_list_gid: "me", workspace: workspace.gid }))?.data?.gid;
+    if (!gid) throw new Error("Could not find your My Tasks list in Asana.");
+    return (myTasksCache = String(gid));
+  }
+
+  /** The projects and My Tasks sections the confirmation cards offer as choices. */
   async function listOptions(): Promise<{ workspace: Choice; projects: Choice[]; sections: Choice[] }> {
     const workspace = await resolveWorkspace();
     // shortcut: first 100 projects only; paginate via next_page.offset if users hit the cap.
-    const [projectsRes, taskList] = await Promise.all([
+    const [projectsRes, sectionsRes] = await Promise.all([
       execute("ASANA_GET_MULTIPLE_PROJECTS", { workspace: workspace.gid, archived: false, limit: 100 }),
-      execute("ASANA_GET_A_USER_TASK_LIST", { user_task_list_gid: "me", workspace: workspace.gid }),
+      myTasksList().then((gid) => execute("ASANA_GET_SECTIONS_IN_PROJECT", { project_gid: gid })),
     ]);
-    // My Tasks is a project-like list; its sections are user-defined (and named in the user's language).
-    const myTasksGid = taskList?.data?.gid;
-    if (!myTasksGid) throw new Error("Could not find your My Tasks list in Asana.");
-    const sectionsRes = await execute("ASANA_GET_SECTIONS_IN_PROJECT", { project_gid: myTasksGid });
-
     return { workspace, projects: toChoices(projectsRes?.data), sections: toChoices(sectionsRes?.data) };
   }
 
@@ -302,7 +374,152 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string 
     };
   }
 
-  return { resolveWorkspace, listOptions, createTask };
+  /**
+   * Incomplete tasks in the user's My Tasks whose name matches `query`, best
+   * match first (exact, prefix, substring, all words), plus the choices the
+   * update card offers.
+   */
+  async function findTasks(query: string) {
+    const workspace = await resolveWorkspace();
+    // shortcut: first 100 incomplete tasks only; paginate via next_page.offset if users hit the cap.
+    const [options, tasksRes, usersRes] = await Promise.all([
+      listOptions(),
+      myTasksList().then((gid) =>
+        execute("ASANA_GET_TASKS_FOR_USER_TASK_LIST", { user_task_list_gid: gid, completed_since: "now", limit: 100, opt_fields: TASK_FIELDS }),
+      ),
+      execute("ASANA_GET_USERS_FOR_WORKSPACE", { workspace_gid: workspace.gid, opt_fields: ["name"] }),
+    ]);
+
+    const q = query.trim().toLowerCase();
+    const rank = (name: string) => {
+      const n = name.toLowerCase();
+      if (n === q) return 0;
+      if (n.startsWith(q)) return 1;
+      if (n.includes(q)) return 2;
+      return q.split(/\s+/).every((word) => n.includes(word)) ? 3 : -1;
+    };
+    const tasks: TaskMatch[] = (tasksRes?.data ?? [])
+      .map((raw: any) => ({ raw, r: rank(String(raw.name ?? "")) }))
+      .filter((x: any) => x.r >= 0)
+      .sort((a: any, b: any) => a.r - b.r)
+      .slice(0, 5)
+      .map(({ raw }: any) => ({
+        task_gid: String(raw.gid),
+        name: String(raw.name ?? ""),
+        notes: String(raw.notes ?? ""),
+        ...localDue(raw),
+        assignee: raw.assignee?.gid ? String(raw.assignee.gid) : "",
+        project: raw.projects?.[0]?.gid ? String(raw.projects[0].gid) : "",
+        section: raw.assignee_section?.gid ? String(raw.assignee_section.gid) : "",
+      }));
+
+    return {
+      tasks,
+      project_choices: options.projects,
+      section_choices: options.sections,
+      assignee_choices: toChoices(usersRes?.data),
+    };
+  }
+
+  /**
+   * Applies only what differs from the task's live state: one update call for
+   * name / description / due / assignee, then project and section moves (which
+   * Asana keeps as separate calls). Re-reads the task so the result is real.
+   */
+  async function updateTask(input: TaskUpdate): Promise<UpdateResult> {
+    const task_gid = input.task_gid.trim();
+    const read = async () => (await execute("ASANA_GET_A_TASK", { task_gid, opt_fields: TASK_FIELDS }))?.data ?? {};
+    const live = await read();
+    if (!live.gid) throw new Error("Asana returned no task for that ID.");
+
+    const changed: string[] = [];
+    const data: Record<string, unknown> = {};
+
+    const name = input.name?.trim();
+    if (name && name !== live.name) {
+      data.name = name;
+      changed.push("name");
+    }
+    if (input.notes !== undefined && input.notes !== (live.notes ?? "")) {
+      data.notes = input.notes;
+      changed.push("description");
+    }
+    if (input.due_on !== undefined) {
+      const want = dueFields(input.due_on.trim(), input.due_time?.trim());
+      const have = live.due_at ? { due_at: new Date(live.due_at).toISOString() } : live.due_on ? { due_on: live.due_on } : {};
+      if (JSON.stringify(want) !== JSON.stringify(have)) {
+        // Setting due_on clears the time, setting due_at sets both; due_at "" clears the date
+        // (Composio drops null, so "" is the only clear that reaches Asana).
+        if (want.due_at) data.due_at = want.due_at;
+        else if (want.due_on) data.due_on = want.due_on;
+        else data.due_at = "";
+        changed.push("due date");
+      }
+    }
+    const assignee = input.assignee?.trim();
+    const reassigned = assignee !== undefined && assignee !== (live.assignee?.gid ?? "");
+    if (reassigned && assignee) {
+      data.assignee = assignee;
+      changed.push("assignee");
+    }
+    if (Object.keys(data).length > 0) await execute("ASANA_UPDATE_A_TASK", { task_gid, data });
+
+    // Follow-ups: the main update has landed, so their failures are warnings.
+    const warnings: string[] = [];
+    if (reassigned && !assignee) {
+      // Unassigning needs assignee: null, which only the raw API (via the proxy) accepts.
+      try {
+        if (!opts.proxy) throw new Error("unassigning is not available");
+        await opts.proxy("asana", "PUT", `https://app.asana.com/api/1.0/tasks/${task_gid}`, { data: { assignee: null } });
+        changed.push("assignee");
+      } catch (err: any) {
+        warnings.push(`unassigning it failed: ${err?.message}`);
+      }
+    }
+    const project = input.project?.trim();
+    const currentProject = live.projects?.[0]?.gid ?? "";
+    if (project !== undefined && project !== currentProject) {
+      try {
+        // Add before remove, so a failure never leaves the task in no project at all.
+        if (project) await execute("ASANA_ADD_PROJECT_FOR_TASK", { task_gid, project });
+        if (currentProject) await execute("ASANA_REMOVE_PROJECT_FROM_TASK", { task_gid, project: currentProject });
+        changed.push("project");
+      } catch (err: any) {
+        warnings.push(`moving it to the project failed: ${err?.message}`);
+      }
+    }
+    const section = input.section?.trim();
+    if (section && section !== (live.assignee_section?.gid ?? "")) {
+      if (reassigned) {
+        warnings.push("the section was left as is because the task left your My Tasks");
+      } else {
+        try {
+          await execute("ASANA_ADD_TASK_TO_SECTION", { section_gid: section, task_gid });
+          changed.push("section");
+        } catch (err: any) {
+          warnings.push(`moving it to the section failed: ${err?.message}`);
+        }
+      }
+    }
+
+    const final = changed.length > 0 ? await read() : live;
+    const due = localDue(final);
+    return {
+      task: {
+        gid: String(final.gid),
+        name: String(final.name ?? ""),
+        section: String(final.assignee_section?.name || "My Tasks"),
+        project: final.projects?.[0]?.name ? String(final.projects[0].name) : "",
+        due: [due.due_on, due.due_time].filter(Boolean).join(" "),
+        assignee: final.assignee?.name ? String(final.assignee.name) : "",
+        permalink_url: final.permalink_url || `https://app.asana.com/0/0/${final.gid}`,
+      },
+      changed,
+      warning: warnings.length > 0 ? `Task updated, but ${warnings.join("; ")}.` : undefined,
+    };
+  }
+
+  return { resolveWorkspace, listOptions, createTask, findTasks, updateTask };
 }
 
 export type Asana = ReturnType<typeof createAsana>;
@@ -493,14 +710,20 @@ export function glance(card: RenderedWidget) {
   return { blocks: [{ type: "widget", html: card.html, height: card.height }] };
 }
 
-/** The card after a successful create; a warning (e.g. section move failed) turns the status tag red. */
-export function successCard({ task, warning }: CreateResult): RenderedWidget {
+/** The card after a successful create or update; a warning (e.g. section move failed) turns the status tag red. */
+export function successCard(
+  { task, warning }: CreateResult,
+  /** Status tag text (default: create's wording); `assignee` replaces the section pill once a task left My Tasks. */
+  opts: { status?: string; assignee?: string } = {},
+): RenderedWidget {
+  const status = opts.status ?? (warning ? "Created · section not set" : "Created in Asana");
+  const placePill = opts.assignee !== undefined ? opts.assignee || "Unassigned" : task.section;
   const body = `
     <div class="as">
       <div class="as-head">
         ${markHtml()}
         <span class="as-chip">MY TASKS</span>
-        <span class="as-tag ${warning ? "as-err" : "as-success"}">${warning ? "Created · section not set" : "Created in Asana"}</span>
+        <span class="as-tag ${warning ? "as-err" : "as-success"}">${esc(clip(status, 44))}</span>
       </div>
       <div class="as-card">
         <div class="as-trow">
@@ -509,7 +732,7 @@ export function successCard({ task, warning }: CreateResult): RenderedWidget {
         </div>
       </div>
       <div class="as-meta">
-        <div class="as-pill">${esc(clip(task.section, 18))}</div>
+        <div class="as-pill">${esc(clip(placePill, 18))}</div>
         ${task.project ? `<div class="as-pill">${esc(clip(task.project, 18))}</div>` : ""}
         ${task.due ? `<div class="as-pill as-due">${CALENDAR_ICON}<span>${esc(task.due)}</span></div>` : ""}
         <a class="as-link" href="${esc(task.permalink_url)}"><span>Open</span>${OPEN_ICON}</a>
@@ -585,7 +808,10 @@ async function main(): Promise<void> {
 
   const userId = process.env.COMPOSIO_USER_ID?.trim() || "default";
   const composio = createComposio({ apiKey: process.env.COMPOSIO_API_KEY?.trim(), userId });
-  const asana = createAsana(composio.execute, { workspaceGid: process.env.ASANA_WORKSPACE_GID?.trim() || undefined });
+  const asana = createAsana(composio.execute, {
+    workspaceGid: process.env.ASANA_WORKSPACE_GID?.trim() || undefined,
+    proxy: composio.proxy,
+  });
   const connection = createAsanaConnection(composio.request, userId);
 
   const server = new McpServer({ name: "asana-tasks", version: "1.0.0" });
@@ -645,6 +871,59 @@ async function main(): Promise<void> {
     },
   );
 
+
+  server.registerTool(
+    "find_asana_tasks",
+    {
+      title: "Find Asana tasks",
+      description: "Find incomplete tasks in the user's Asana My Tasks by name. Returns up to 5 matches with each task's current values (already shaped as update_task arguments) plus project_choices, section_choices and assignee_choices. Always call this before update_task. If several tasks match, ask the user which one they mean.",
+      inputSchema: { query: z.string().describe("Words from the task's name, e.g. \"meeting with Eric\"") } as any,
+    },
+    // No glance card: a silent lookup step before update_task's confirmation card.
+    async (args: { query: string }) => {
+      try {
+        return textResult(await asana.findTasks(args.query));
+      } catch (err) {
+        console.error("find_asana_tasks failed:", err);
+        return textResult(await describeError(err, connection, userId), true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_task",
+    {
+      title: "Update task",
+      description: "Update an existing task in the user's Asana My Tasks: rename it or change its description, due date and time, assignee, project or My Tasks section. Use when the user asks to change, rename, reschedule, move, reassign or edit a task. First call find_asana_tasks and pick the user's task; pass that match's values unchanged except for what the user asked to change (\"\" clears the due date, project or assignee), plus project_choices, section_choices and assignee_choices from find_asana_tasks so the user can adjust them on the confirmation card. Not for completing tasks.",
+      inputSchema: {
+        task_gid: z.string().describe("The task's gid from find_asana_tasks"),
+        name: z.string().optional().describe("Task name"),
+        notes: z.string().optional().describe("Task description"),
+        due_on: z.string().optional().describe("Due date, YYYY-MM-DD; \"\" clears it"),
+        due_time: z.string().optional().describe("Due time in the user's local time, 24h HH:MM; \"\" for a date-only due"),
+        assignee: z.string().optional().describe("Assignee user gid from assignee_choices; \"\" unassigns"),
+        project: z.string().optional().describe("Project gid from project_choices; \"\" removes the task from its project"),
+        section: z.string().optional().describe("My Tasks section gid from section_choices"),
+        // Only the confirmation card reads these (to fill its dropdowns).
+        project_choices: choiceSchema.optional().describe("project_choices from find_asana_tasks, passed through unchanged"),
+        section_choices: choiceSchema.optional().describe("section_choices from find_asana_tasks, passed through unchanged"),
+        assignee_choices: choiceSchema.optional().describe("assignee_choices from find_asana_tasks, passed through unchanged"),
+      } as any,
+    },
+    async (args: TaskUpdate) => {
+      try {
+        const result = await asana.updateTask(args);
+        const status = result.changed.length === 0 ? "No changes" : `Updated · ${result.changed.join(", ")}`;
+        const card = successCard(result, { status, assignee: result.changed.includes("assignee") ? result.task.assignee : undefined });
+        return textResult({ success: true, ...result, _voiceos_glance: glance(card) });
+      } catch (err: any) {
+        console.error("update_task failed:", err);
+        const { error, reconnect } = await describeError(err, connection, userId);
+        const card = errorCard(args.name || "Update task", error);
+        return textResult({ error, reconnect, task_gid: args.task_gid, _voiceos_glance: glance(card) }, true);
+      }
+    },
+  );
   await server.connect(new StdioServerTransport());
 }
 

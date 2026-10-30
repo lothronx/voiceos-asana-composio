@@ -42,11 +42,16 @@
   var view = new Date(today.getFullYear(), today.getMonth(), 1); // first day of the month the calendar shows
 
   // ---- Option lists: [{v, l}], the first entry is the "none" choice ----
-  var menus = {
-    due_time: [{ v: '', l: 'No time' }],
-    project: [{ v: '', l: 'No project' }],
-    section: [{ v: '', l: 'Default section' }],
-  };
+  // Every list row in the markup ([data-menu], except the date picker) gets a menu;
+  // its "none" label comes from data-none, its options from the `<key>_choices` arg.
+  var menus = {};
+  var listKeys = [];
+  Array.prototype.forEach.call(document.querySelectorAll('.as-val[data-menu]'), function (btn) {
+    var key = btn.getAttribute('data-menu');
+    if (key === 'cal') return;
+    menus[key] = [{ v: '', l: btn.getAttribute('data-none') || 'None' }];
+    if (key !== 'due_time') listKeys.push(key);
+  });
   for (var h = 0; h < 24; h++) {
     for (var m = 0; m < 60; m += 30) {
       var t = pad(h) + ':' + pad(m);
@@ -228,28 +233,26 @@
     if (e.source !== parent || !e.data || e.data.type !== 'voiceos:init') return;
     var a = e.data.args || {};
 
-    [['project', a.project_choices], ['section', a.section_choices]].forEach(function (p) {
-      (Array.isArray(p[1]) ? p[1] : []).forEach(function (c) {
-        if (c && c.gid != null) ensure(p[0], String(c.gid), String(c.name || c.gid));
+    listKeys.forEach(function (key) {
+      var choices = a[key + '_choices'];
+      (Array.isArray(choices) ? choices : []).forEach(function (c) {
+        if (c && c.gid != null) ensure(key, String(c.gid), String(c.name || c.gid));
       });
+      ensure(key, a[key] ? String(a[key]) : '');
     });
-    ensure('project', a.project ? String(a.project) : '');
-    ensure('section', a.section ? String(a.section) : '');
     ensure('due_time', a.due_time ? String(a.due_time) : '', a.due_time ? clock(String(a.due_time)) : '');
 
-    ['due_on', 'due_time', 'project', 'section'].forEach(function (k) {
+    ['due_on', 'due_time'].concat(listKeys).forEach(function (k) {
       $('as-' + k).value = a[k] == null ? '' : String(a[k]);
     });
     var d = parse(a.due_on);
     if (d) view = new Date(d.getFullYear(), d.getMonth(), 1);
 
     renderDate();
-    renderMenu('project');
-    renderMenu('section');
+    listKeys.forEach(renderMenu);
   });
 
   // First paint before init arrives (empty card).
   renderDate();
-  renderMenu('project');
-  renderMenu('section');
+  listKeys.forEach(renderMenu);
 })();
