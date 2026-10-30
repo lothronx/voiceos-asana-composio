@@ -27,30 +27,47 @@ Everything that runs is in `server.ts`. `AGENTS.md` describes the file layout an
 | Delete project | `delete_project` | yes | `find_asana_projects` |
 | Create goal | `create_goal` | yes | `list_asana_options` (kind `goal`) |
 
-The four helpers have `visibility: "agent"`. They are lookups, not extra features.
+## Differences from the spec
 
-- **Why the agent looks things up first:** a confirmation card can only show what the tool's arguments carry, and it
-  cannot fetch data itself. So the agent fetches the choices first (projects, sections, teams, people, time periods,
-  how many tasks a delete removes).
-- **Why `set_task_done` exists:** it lets a user complete a task by clicking the circle on a task card. If a card
-  started an approval itself, VoiceOS would show a raw-JSON dialog. Instead, each card row carries a signed token, and
-  `set_task_done` refuses calls without it, so the agent cannot use it to skip confirmation.
+### 1. Four extra tools beyond the nine approved ones
 
-## How each requirement is met
+The spec says "no others". We register 13 tools: the 9 approved ones plus 4 helpers. The helpers are hidden from the
+user (`visibility: "agent"`). They add no new Asana capability; each one only serves an approved tool.
 
-- **OAuth2 connect/disconnect:** in the **Composio dashboard**, not in VoiceOS. Custom integrations cannot use
-  VoiceOS's native connect toggle, so this was a deliberate decision.
-- **Confirmation before Delete project:** the card shows how many tasks will be deleted along with the project. Before
-  deleting, the server reads the project name and that count again, and deletes nothing if either changed.
-- **Success/error feedback for writes:** every write returns a notch result card (VoiceOS's "glance" card), both on
-  success and on failure.
-- **Loading states:** the host shows them during voice tool calls. On cards, an expanding row shows "Loading…", and
-  the circle flips right away, then rolls back if the write fails.
-- **Expired or revoked token:**
-  - Errors say which problem it is: "not connected yet", "expired", or "revoked/disabled". They also say where to
-    reconnect.
-  - Composio refreshes the tokens.
-  - These errors are covered by unit tests only. A real expired token was never tested.
+| Extra tool | What it does | Serves | Why it is needed |
+|---|---|---|---|
+| `list_asana_options` | Read-only. Returns the choices a card offers: projects + My Tasks sections (`kind: "task"`), teams + views (`"project"`), people + time periods (`"goal"`). | Create task, Create project, Create goal | A confirmation card can only show what the tool's arguments carry; it cannot fetch data. Without this lookup the card's dropdowns would be empty. |
+| `find_asana_tasks` | Read-only. Finds the user's open tasks by name and returns each one's current values, already shaped as `update_task` arguments, plus the dropdown choices. | Update task | The update card has to show the task's current values so the user sees what changes. `search_tasks` returns a different shape and covers the whole workspace, while updates are limited to the user's own tasks. |
+| `find_asana_projects` | Read-only. Finds projects by name and counts how many tasks deleting each would remove. | Delete project | The delete card must say how many tasks go with the project. That count has to come from Asana before the card opens. |
+| `set_task_done` | Completes or reopens a task when the user clicks the circle on a task card. | Complete task | If a card started an approval itself, VoiceOS would show a raw-JSON dialog. Each card row carries a signed token, and `set_task_done` refuses any call without a valid one, so the agent cannot use it to skip confirmation. Completing by voice still goes through `complete_task` and its card. |
+
+The 4 extra tools can be removed only by giving up what they serve: working dropdowns, current values on the update
+card, the delete warning count, and one-click completion.
+
+### 2. Connect/disconnect is in the Composio dashboard, not in VoiceOS
+
+The spec asks for an Asana connect/disconnect UI. Custom integrations cannot use VoiceOS's native connect toggle, so
+linking happens in platform.composio.dev → Connected accounts. OAuth2 itself runs through Composio end to end.
+
+### 3. "Toasts" are notch result cards
+
+Every write returns a result card in the notch (VoiceOS's "glance" card), both on success and on failure. VoiceOS has
+no separate toast for integrations.
+
+### 4. Loading states are mostly the host's
+
+During voice tool calls, VoiceOS shows the loading state. On our cards, an expanding row shows "Loading…", and the
+circle flips right away, then rolls back if the write fails.
+
+### 5. Token refresh is Composio's, and expiry was not tested live
+
+- Composio refreshes the tokens.
+- Errors say which problem it is: "not connected yet", "expired", or "revoked/disabled". They also say where to
+  reconnect.
+- These errors are covered by unit tests only. A real expired token was never tested.
+
+Confirmation before Delete project is met as written: the card shows how many tasks will be deleted with the project.
+Before deleting, the server reads the project name and that count again, and deletes nothing if either changed.
 
 ## Asana and Composio behaviour you would not guess
 
