@@ -37,7 +37,8 @@ function fakeAsana(fail: Record<string, string> = {}) {
           assignee: "assignee" in args.data ? (args.data.assignee ? { gid: args.data.assignee, name: "Someone" } : null) : state.assignee,
           assignee_section: args.data.assignee_section ? { gid: args.data.assignee_section, name: "Today" } : state.assignee_section,
         };
-        return { data: {} };
+        // Like Asana: with opt_fields the update answers with the task.
+        return { data: args.opt_fields ? structuredClone(state) : {} };
       case "ASANA_ADD_PROJECT_FOR_TASK": state.projects = [{ gid: args.project, name: "New project" }, ...state.projects]; return { data: {} };
       case "ASANA_REMOVE_PROJECT_FROM_TASK": state.projects = state.projects.filter((p: any) => p.gid !== args.project); return { data: {} };
     }
@@ -55,7 +56,7 @@ test("only fields that differ from the live task are sent, in one update call", 
   const result = await update(fake, { name: "Call Eric", notes: "agenda", due_on: "2026-11-02", due_time: "9:00", project: "p1", section: "s1" });
 
   expect(fake.writes()).toEqual([
-    { slug: "ASANA_UPDATE_A_TASK", args: { task_gid: "42", data: { notes: "agenda", due_at: "2026-11-02T15:00:00.000Z" } } },
+    { slug: "ASANA_UPDATE_A_TASK", args: { task_gid: "42", data: { notes: "agenda", due_at: "2026-11-02T15:00:00.000Z" }, opt_fields: expect.any(Array) } },
   ]);
   expect(result.changed).toEqual(["description", "due date"]);
 });
@@ -111,7 +112,7 @@ test("a new project is added before the old one is removed; '' removes it", asyn
 test("the section moves in the same update call, but not when the task is reassigned", async () => {
   const mine = fakeAsana();
   const moved = await update(mine, { section: "s2" });
-  expect(mine.writes()).toEqual([{ slug: "ASANA_UPDATE_A_TASK", args: { task_gid: "42", data: { assignee_section: "s2" } } }]);
+  expect(mine.writes()).toEqual([{ slug: "ASANA_UPDATE_A_TASK", args: { task_gid: "42", data: { assignee_section: "s2" }, opt_fields: expect.any(Array) } }]);
   expect(moved.task.section).toBe("Today");
 
   const reassigned = fakeAsana();
@@ -184,4 +185,18 @@ test("a pick the card labeled wrongly is refused before any write", async () => 
 
   const unknown = fakeAsana();
   expect(update(unknown, { assignee: "u404" })).rejects.toThrow("There is no assignee u404");
+});
+
+test("a plain edit reads the task once: the update call returns the new state", async () => {
+  const fake = fakeAsana();
+  const result = await update(fake, { name: "Call Eric today", due_on: "2026-11-02" });
+  expect(fake.calls.filter((c) => c.slug === "ASANA_GET_A_TASK")).toHaveLength(1);
+  expect(result.task).toMatchObject({ name: "Call Eric today", due: "2026-11-02" });
+});
+
+test("after a project move the task is re-read (the move calls return nothing)", async () => {
+  const fake = fakeAsana();
+  const result = await update(fake, { name: "Call Eric today", project: "p2" });
+  expect(fake.calls.filter((c) => c.slug === "ASANA_GET_A_TASK")).toHaveLength(2);
+  expect(result.task.project).toBe("New project");
 });

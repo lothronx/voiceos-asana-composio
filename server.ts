@@ -365,9 +365,6 @@ export interface TaskDetails {
   projects: string[];
   section: string;
   tags: string[];
-  parent: string;
-  created_at: string;
-  modified_at: string;
   subtasks: { name: string; completed: boolean }[];
   /** Newest last. */
   comments: { author: string; text: string; created_at: string }[];
@@ -584,7 +581,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
   /**
    * Applies only what differs from the task's live state: one update call for
    * name / description / due / assignee / section, then a project move (which
-   * Asana keeps as separate calls). Re-reads the task so the result is real.
+   * Asana keeps as separate calls). The result is Asana's real state: the
+   * update call returns the task, and a project move or unassign re-reads it.
    */
   async function updateTask(input: TaskUpdate): Promise<UpdateResult> {
     const task_gid = input.task_gid.trim();
@@ -638,7 +636,9 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
         changed.push("section");
       }
     }
-    if (Object.keys(data).length > 0) await execute("ASANA_UPDATE_A_TASK", { task_gid, data });
+    const updated = Object.keys(data).length > 0
+      ? (await execute("ASANA_UPDATE_A_TASK", { task_gid, data, opt_fields: TASK_FIELDS }))?.data
+      : undefined;
 
     // Follow-ups: the main update has landed, so their failures are warnings.
     if (reassigned && !assignee) {
@@ -663,7 +663,9 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
         warnings.push(`moving it to the project failed: ${err?.message}`);
       }
     }
-    const final = changed.length > 0 ? await read() : live;
+    // Project moves and the proxy unassign don't return the task; only they need a fresh read.
+    const movedElsewhere = changed.includes("project") || (reassigned && !assignee) || warnings.length > 0;
+    const final = changed.length === 0 ? live : updated?.gid && !movedElsewhere ? updated : await read();
     const due = localDue(final);
     return {
       task: {
@@ -760,8 +762,8 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
       execute("ASANA_GET_A_TASK", {
         task_gid,
         opt_fields: [
-          "name", "notes", "completed", "due_on", "due_at", "permalink_url", "created_at", "modified_at",
-          "assignee.name", "assignee_section.name", "projects.name", "tags.name", "parent.name",
+          "name", "notes", "completed", "due_on", "due_at", "permalink_url",
+          "assignee.name", "assignee_section.name", "projects.name", "tags.name",
         ],
       }),
       execute("ASANA_GET_TASK_SUBTASKS", { task_gid, limit: 50, opt_fields: ["name", "completed"] }),
@@ -783,9 +785,6 @@ export function createAsana(execute: ExecuteTool, opts: { workspaceGid?: string;
       projects: (t.projects ?? []).map((p: any) => String(p.name ?? "")).filter(Boolean),
       section: t.assignee_section?.name ? String(t.assignee_section.name) : "",
       tags: (t.tags ?? []).map((x: any) => String(x.name ?? "")).filter(Boolean),
-      parent: t.parent?.name ? String(t.parent.name) : "",
-      created_at: String(t.created_at ?? ""),
-      modified_at: String(t.modified_at ?? ""),
       subtasks: (subtasksRes?.data ?? []).map((x: any) => ({ name: String(x.name ?? ""), completed: !!x.completed })),
       // Stories mix comments with system events ("changed the due date"); keep the latest 3 comments.
       comments: (storiesRes?.data ?? [])
@@ -1495,6 +1494,23 @@ async function main(): Promise<void> {
     content: [{ type: "text" as const, text: JSON.stringify(payload) }],
   });
 
+  /**
+   * Wraps a tool body: its return value becomes the result; a failure is logged
+   * and turned into plain words (with an error card unless the tool is a
+   * silent helper, `cardTitle` null).
+   */
+  const guarded = <A,>(tool: string, cardTitle: ((args: A) => string) | null, body: (args: A) => Promise<unknown>) =>
+    async (args: A) => {
+      try {
+        return textResult(await body(args));
+      } catch (err) {
+        console.error(`${tool} failed:`, err);
+        const { error, reconnect } = await describeError(err, linkStatus, userId);
+        const card = cardTitle ? { _voiceos_glance: glance(errorCard(cardTitle(args), error)) } : {};
+        return textResult({ error, reconnect, ...card }, true);
+      }
+    };
+
   server.registerTool(
     "list_asana_options",
     {
@@ -1503,14 +1519,9 @@ async function main(): Promise<void> {
       inputSchema: {} as any,
     },
     // No glance card: this is a silent lookup step before create_task's confirmation card.
-    async () => {
-      try {
-        return textResult(await asana.listOptions(true));
-      } catch (err) {
-        console.error("list_asana_options failed:", err);
-        return textResult(await describeError(err, linkStatus, userId), true);
-      }
-    },
+    guarded("list_asana_options", null, async () => {
+      return await asana.listOptions(true);
+    }),
   );
 
   const choiceSchema = z.array(z.object({ gid: z.string(), name: z.string() }));
@@ -1535,17 +1546,10 @@ async function main(): Promise<void> {
         section_choices: choiceSchema.optional().describe("The sections array returned by list_asana_options, passed through unchanged"),
       } as any,
     },
-    async (args: NewTask) => {
-      try {
-        const result = await asana.createTask(args);
-        return textResult({ success: true, ...result, _voiceos_glance: glance(successCard(result)) });
-      } catch (err: any) {
-        console.error("create_task failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        const card = errorCard(args.name || "New Task", error);
-        return textResult({ error, reconnect, taskName: args.name, _voiceos_glance: glance(card) }, true);
-      }
-    },
+    guarded("create_task", (a) => a.name || "New Task", async (args: NewTask) => {
+      const result = await asana.createTask(args);
+      return { success: true, ...result, _voiceos_glance: glance(successCard(result)) };
+    }),
   );
 
 
@@ -1557,14 +1561,9 @@ async function main(): Promise<void> {
       inputSchema: { query: z.string().describe("Words from the task's name, e.g. \"meeting with Eric\"") } as any,
     },
     // No glance card: a silent lookup step before update_task's confirmation card.
-    async (args: { query: string }) => {
-      try {
-        return textResult(await asana.findTasks(args.query));
-      } catch (err) {
-        console.error("find_asana_tasks failed:", err);
-        return textResult(await describeError(err, linkStatus, userId), true);
-      }
-    },
+    guarded("find_asana_tasks", null, async (args: { query: string }) => {
+      return await asana.findTasks(args.query);
+    }),
   );
 
   server.registerTool(
@@ -1587,19 +1586,12 @@ async function main(): Promise<void> {
         assignee_choices: choiceSchema.optional().describe("assignee_choices from find_asana_tasks, passed through unchanged"),
       } as any,
     },
-    async (args: TaskUpdate) => {
-      try {
-        const result = await asana.updateTask(args);
-        const status = result.changed.length === 0 ? "No changes" : `Updated · ${result.changed.join(", ")}`;
-        const card = successCard(result, { status, assignee: result.changed.includes("assignee") ? result.task.assignee : undefined });
-        return textResult({ success: true, ...result, _voiceos_glance: glance(card) });
-      } catch (err: any) {
-        console.error("update_task failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        const card = errorCard(args.name || "Update task", error);
-        return textResult({ error, reconnect, task_gid: args.task_gid, _voiceos_glance: glance(card) }, true);
-      }
-    },
+    guarded("update_task", (a) => a.name || "Update task", async (args: TaskUpdate) => {
+      const result = await asana.updateTask(args);
+      const status = result.changed.length === 0 ? "No changes" : `Updated · ${result.changed.join(", ")}`;
+      const card = successCard(result, { status, assignee: result.changed.includes("assignee") ? result.task.assignee : undefined });
+      return { success: true, ...result, _voiceos_glance: glance(card) };
+    }),
   );
 
   server.registerTool(
@@ -1616,16 +1608,10 @@ async function main(): Promise<void> {
         include_completed: z.boolean().optional().describe("Also return completed tasks; default false"),
       } as any,
     },
-    async (args: TaskSearch) => {
-      try {
-        const result = await asana.searchTasks(args);
-        return textResult({ ...result, untrusted: UNTRUSTED_NOTE, _voiceos_glance: glance(taskListCard("Search", result)) });
-      } catch (err) {
-        console.error("search_tasks failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard("Search tasks", error)) }, true);
-      }
-    },
+    guarded("search_tasks", () => "Search tasks", async (args: TaskSearch) => {
+      const result = await asana.searchTasks(args);
+      return { ...result, untrusted: UNTRUSTED_NOTE, _voiceos_glance: glance(taskListCard("Search", result)) };
+    }),
   );
 
   server.registerTool(
@@ -1638,32 +1624,26 @@ async function main(): Promise<void> {
         query: z.string().optional().describe("The task's name, when the gid isn't known"),
       } as any,
     },
-    async (args: { task_gid?: string; query?: string }) => {
-      try {
-        let gid = args.task_gid?.trim();
-        if (!gid) {
-          const q = args.query?.trim();
-          if (!q) throw new Error("Say which task: give its name or gid.");
-          const found = await asana.searchTasks({ query: q, include_completed: true }, 5);
-          // Only pick for the user when it's unambiguous; otherwise show the candidates.
-          const exact = found.tasks.filter((t) => t.name.toLowerCase() === q.toLowerCase());
-          const pick = exact.length === 1 ? exact[0] : found.total === 1 ? found.tasks[0] : undefined;
-          if (!pick) {
-            const next = found.total === 0
-              ? `No task matches "${q}".`
-              : "Several tasks match: ask the user which one, then call get_task with its task_gid.";
-            return textResult({ matches: found.tasks, total: found.total, next, _voiceos_glance: glance(taskListCard("Which task?", found)) });
-          }
-          gid = pick.gid;
+    guarded("get_task", () => "Get task", async (args: { task_gid?: string; query?: string }) => {
+      let gid = args.task_gid?.trim();
+      if (!gid) {
+        const q = args.query?.trim();
+        if (!q) throw new Error("Say which task: give its name or gid.");
+        const found = await asana.searchTasks({ query: q, include_completed: true }, 5);
+        // Only pick for the user when it's unambiguous; otherwise show the candidates.
+        const exact = found.tasks.filter((t) => t.name.toLowerCase() === q.toLowerCase());
+        const pick = exact.length === 1 ? exact[0] : found.total === 1 ? found.tasks[0] : undefined;
+        if (!pick) {
+          const next = found.total === 0
+            ? `No task matches "${q}".`
+            : "Several tasks match: ask the user which one, then call get_task with its task_gid.";
+          return { matches: found.tasks, total: found.total, next, _voiceos_glance: glance(taskListCard("Which task?", found)) };
         }
-        const task = await asana.getTask(gid);
-        return textResult({ task, untrusted: UNTRUSTED_NOTE, _voiceos_glance: glance(taskDetailsCard(task)) });
-      } catch (err) {
-        console.error("get_task failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard("Get task", error)) }, true);
+        gid = pick.gid;
       }
-    },
+      const task = await asana.getTask(gid);
+      return { task, untrusted: UNTRUSTED_NOTE, _voiceos_glance: glance(taskDetailsCard(task)) };
+    }),
   );
 
   server.registerTool(
@@ -1677,16 +1657,10 @@ async function main(): Promise<void> {
         text: z.string().describe("The comment, plain text"),
       } as any,
     },
-    async (args: TaskRef & { text: string }) => {
-      try {
-        const result = await asana.addComment(args);
-        return textResult({ success: true, ...result, _voiceos_glance: glance(commentCard(result)) });
-      } catch (err) {
-        console.error("add_comment failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard(args.task_name || "Add comment", error)) }, true);
-      }
-    },
+    guarded("add_comment", (a) => a.task_name || "Add comment", async (args: TaskRef & { text: string }) => {
+      const result = await asana.addComment(args);
+      return { success: true, ...result, _voiceos_glance: glance(commentCard(result)) };
+    }),
   );
 
   server.registerTool(
@@ -1700,18 +1674,12 @@ async function main(): Promise<void> {
         completed: z.boolean().optional().describe("true (default) completes the task, false reopens it"),
       } as any,
     },
-    async (args: TaskRef & { completed?: boolean }) => {
-      try {
-        const result = await asana.setCompleted(args);
-        const done = result.task.completed;
-        const status = result.changed ? (done ? "Completed" : "Reopened") : (done ? "Already completed" : "Already open");
-        return textResult({ success: true, ...result, _voiceos_glance: glance(successCard(result, { status })) });
-      } catch (err) {
-        console.error("complete_task failed:", err);
-        const { error, reconnect } = await describeError(err, linkStatus, userId);
-        return textResult({ error, reconnect, _voiceos_glance: glance(errorCard(args.task_name || "Complete task", error)) }, true);
-      }
-    },
+    guarded("complete_task", (a) => a.task_name || "Complete task", async (args: TaskRef & { completed?: boolean }) => {
+      const result = await asana.setCompleted(args);
+      const done = result.task.completed;
+      const status = result.changed ? (done ? "Completed" : "Reopened") : (done ? "Already completed" : "Already open");
+      return { success: true, ...result, _voiceos_glance: glance(successCard(result, { status })) };
+    }),
   );
 
   server.registerTool(
@@ -1726,17 +1694,12 @@ async function main(): Promise<void> {
         card_token: z.string().describe("The token the card was rendered with"),
       } as any,
     },
-    async (args: TaskRef & { completed: boolean; card_token: string }) => {
-      try {
-        if (!isCardToken(args.task_gid, args.card_token)) {
-          throw new Error("This card has expired. Search again to complete the task here, or say it to complete it.");
-        }
-        return textResult({ success: true, ...(await asana.completeFromCard(args.task_gid, args.completed !== false)) });
-      } catch (err) {
-        console.error("set_task_done failed:", err);
-        return textResult(await describeError(err, linkStatus, userId), true);
+    guarded("set_task_done", null, async (args: TaskRef & { completed: boolean; card_token: string }) => {
+      if (!isCardToken(args.task_gid, args.card_token)) {
+        throw new Error("This card has expired. Search again to complete the task here, or say it to complete it.");
       }
-    },
+      return { success: true, ...(await asana.completeFromCard(args.task_gid, args.completed !== false)) };
+    }),
   );
   await server.connect(new StdioServerTransport());
 }

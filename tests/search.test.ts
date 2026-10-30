@@ -81,7 +81,7 @@ test("getTask merges fields, subtasks and the latest three real comments", async
     ASANA_GET_A_TASK: { data: {
       gid: "42", name: "Call Eric", notes: "agenda " + "x".repeat(3000), completed: false, due_at: "2026-10-31T22:30:00.000Z",
       assignee: { name: "Yue" }, assignee_section: { name: "Today" }, projects: [{ name: "Launch" }], tags: [{ name: "urgent" }],
-      parent: null, created_at: "c", modified_at: "m", permalink_url: "https://app.asana.com/x",
+      permalink_url: "https://app.asana.com/x",
     } },
     ASANA_GET_TASK_SUBTASKS: { data: [{ name: "Book room", completed: true }, { name: "Send invite", completed: false }] },
     ASANA_GET_STORIES_FOR_TASK: { data: [
@@ -96,7 +96,7 @@ test("getTask merges fields, subtasks and the latest three real comments", async
   expect(task.notes).toHaveLength(3007); // descriptions are never cut: update_task may write them back
   expect(task).toMatchObject({
     name: "Call Eric", due: "2026-10-31 17:30", assignee: "Yue", section: "Today",
-    projects: ["Launch"], tags: ["urgent"], parent: "",
+    projects: ["Launch"], tags: ["urgent"],
     subtasks: [{ name: "Book room", completed: true }, { name: "Send invite", completed: false }],
   });
   expect(task.comments.map((c) => c.text)).toEqual(["two", "three", "four"]);
